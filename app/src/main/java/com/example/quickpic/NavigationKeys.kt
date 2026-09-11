@@ -1,6 +1,7 @@
 package com.example.quickpic
 
-import androidx.navigation3.runtime.NavKey
-import kotlinx.serialization.Serializable
+// Simple navigation key type alias for Compose Navigation routes
+typealias NavKey = String
 
-@Serializable data object Main : NavKey
+// Define route constants
+const val Main: NavKey = "main"

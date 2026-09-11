@@ -3,25 +3,94 @@ package com.example.quickpic.ui.main
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.quickpic.data.DataRepository
-import com.example.quickpic.ui.main.MainScreenUiState.Success
+import com.example.quickpic.data.MediaFolder
+import com.example.quickpic.data.MediaItem
+import com.example.quickpic.data.MediaLibrary
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 
+enum class SortMode { NAME, DATE, FLOW }
+enum class SortDirection { ASCENDING, DESCENDING }
+
 class MainScreenViewModel(dataRepository: DataRepository) : ViewModel() {
-  val uiState: StateFlow<MainScreenUiState> =
-    dataRepository.data
-      .map<List<String>, MainScreenUiState>(::Success)
-      .catch { emit(MainScreenUiState.Error(it)) }
-      .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MainScreenUiState.Loading)
+    private val refreshRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val sortMode = MutableStateFlow(SortMode.NAME)
+    private val sortDirection = MutableStateFlow(SortDirection.ASCENDING)
+
+    val selectedSortMode: StateFlow<SortMode> = sortMode
+    val selectedSortDirection: StateFlow<SortDirection> = sortDirection
+
+    val uiState: StateFlow<MainScreenUiState> = refreshRequests
+        .onStart { emit(Unit) }
+        .flatMapLatest {
+            dataRepository.data
+                .combine(sortMode) { library, sort -> library to sort }
+                .combine(sortDirection) { (library, sort), direction -> library.sorted(sort, direction) }
+                .map<MediaLibrary, MainScreenUiState> { MainScreenUiState.Success(it) }
+        }
+        .catch { emit(MainScreenUiState.Error(it)) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainScreenUiState.Loading)
+
+    fun refresh() = refreshRequests.tryEmit(Unit)
+    fun setSortMode(mode: SortMode) { sortMode.value = mode }
+    fun setSortDirection(direction: SortDirection) { sortDirection.value = direction }
+}
+
+private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): MediaLibrary = when (mode) {
+    SortMode.NAME -> copy(
+        folders = folders.sortedWith(
+            compareBy<MediaFolder> { it.displayName.lowercase() }
+                .thenBy { it.path }
+        ),
+        media = media.sortedWith(
+            compareBy<MediaItem> { it.displayName.lowercase() }
+                .thenBy { it.id }
+        ),
+    )
+
+    SortMode.DATE -> {
+        val newestByFolder: Map<String, Long> = media
+            .asSequence()
+            .groupingBy { it.relativePath }
+            .fold(0L) { newest, item -> maxOf(newest, item.dateAddedSeconds.coerceAtLeast(0L)) }
+
+        val sortedFolders = folders.sortedWith(
+            compareBy<MediaFolder> { newestByFolder[it.path] ?: 0L }
+                .thenBy { it.displayName.lowercase() }
+                .thenBy { it.path }
+        )
+        val sortedMedia = media.sortedWith(
+            compareBy<MediaItem> { it.dateAddedSeconds.coerceAtLeast(0L) }
+                .thenBy { it.displayName.lowercase() }
+                .thenBy { it.id }
+        )
+        copy(
+            folders = if (direction == SortDirection.DESCENDING) sortedFolders.asReversed() else sortedFolders,
+            media = if (direction == SortDirection.DESCENDING) sortedMedia.asReversed() else sortedMedia,
+        )
+    }
+
+    SortMode.FLOW -> copy(
+        folders = folders.sortedBy { it.path },
+        media = media.sortedWith(
+            compareBy<MediaItem> { it.relativePath.lowercase() }
+                .thenBy { it.displayName.lowercase() }
+                .thenBy { it.id }
+        ),
+    )
+
 }
 
 sealed interface MainScreenUiState {
-  object Loading : MainScreenUiState
-
-  data class Error(val throwable: Throwable) : MainScreenUiState
-
-  data class Success(val data: List<String>) : MainScreenUiState
+    data object Loading : MainScreenUiState
+    data class Error(val throwable: Throwable) : MainScreenUiState
+    data class Success(val data: MediaLibrary) : MainScreenUiState
 }

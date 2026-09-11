@@ -1,8 +1,10 @@
 package com.example.quickpic.ui.main
 
 import androidx.activity.ComponentActivity
+import android.net.Uri
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import com.example.quickpic.data.MediaItem
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -14,13 +16,16 @@ class MainScreenTest {
 
   @Before
   fun setup() {
-    composeTestRule.setContent { MainScreen(FAKE_DATA) }
+    composeTestRule.setContent { MediaGrid(FAKE_DATA) }
   }
 
   @Test
   fun firstItem_exists() {
-    FAKE_DATA.forEach { composeTestRule.onNodeWithText("Hello $it!").assertExists() }
+    FAKE_DATA.forEach { composeTestRule.onNodeWithText(it.displayName).assertExists() }
   }
 }
 
-private val FAKE_DATA = listOf("Sample1", "Sample2", "Sample3")
+private val FAKE_DATA = listOf(
+  MediaItem(1, Uri.parse("content://media/1"), "Sample1", "image/jpeg", 0, 0),
+  MediaItem(2, Uri.parse("content://media/2"), "Sample2", "video/mp4", 0, 0),
+)

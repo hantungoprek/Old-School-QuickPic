@@ -1,6 +1,7 @@
 package com.example.quickpic.ui.main
 
 import com.example.quickpic.data.DataRepository
+import com.example.quickpic.data.MediaItem
 import junit.framework.TestCase.assertEquals
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -23,5 +24,5 @@ class MainScreenViewModelTest {
 }
 
 private class FakeMyModelRepository : DataRepository {
-  override val data: Flow<List<String>> = flow { emit(listOf("Sample")) }
+  override val data: Flow<List<MediaItem>> = flow { emit(emptyList()) }
 }
