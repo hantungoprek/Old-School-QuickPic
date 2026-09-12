@@ -46,10 +46,10 @@ class MainScreenViewModel(dataRepository: DataRepository) : ViewModel() {
 
 private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): MediaLibrary = when (mode) {
     SortMode.NAME -> copy(
-        folders = folders.sortedWith(
+        folders = pinStandardFolders(folders.sortedWith(
             compareBy<MediaFolder> { it.displayName.lowercase() }
                 .thenBy { it.path }
-        ),
+        )),
         media = media.sortedWith(
             compareBy<MediaItem> { it.displayName.lowercase() }
                 .thenBy { it.id }
@@ -73,13 +73,13 @@ private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): Media
                 .thenBy { it.id }
         )
         copy(
-            folders = if (direction == SortDirection.DESCENDING) sortedFolders.asReversed() else sortedFolders,
+            folders = pinStandardFolders(if (direction == SortDirection.DESCENDING) sortedFolders.asReversed() else sortedFolders),
             media = if (direction == SortDirection.DESCENDING) sortedMedia.asReversed() else sortedMedia,
         )
     }
 
     SortMode.FLOW -> copy(
-        folders = folders.sortedBy { it.path },
+        folders = pinStandardFolders(folders.sortedBy { it.path }),
         media = media.sortedWith(
             compareBy<MediaItem> { it.relativePath.lowercase() }
                 .thenBy { it.displayName.lowercase() }
@@ -87,6 +87,29 @@ private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): Media
         ),
     )
 
+}
+
+private fun pinStandardFolders(folders: List<MediaFolder>): List<MediaFolder> {
+    // Keep Android's two most common camera/screenshot locations fixed at the top.
+    // DCIM/Camera is the primary default; if it does not exist, fall back to DCIM/.
+    val dcimCamera = folders.firstOrNull { it.path.equals("DCIM/Camera/", ignoreCase = true) }
+    val dcim = folders.firstOrNull { it.path.equals("DCIM/", ignoreCase = true) }
+    val screenshots = folders.firstOrNull {
+        it.path.equals("Pictures/Screenshots/", ignoreCase = true) ||
+            it.path.equals("Pictures/Screenshot/", ignoreCase = true)
+    }
+    val primaryDcim = dcimCamera ?: dcim
+    val pinnedPaths = buildSet {
+        primaryDcim?.let { add(it.path) }
+        // If DCIM/ exists alongside DCIM/Camera/, keep the parent available but not pinned.
+        screenshots?.let { add(it.path) }
+    }
+    val others = folders.filterNot { it.path in pinnedPaths }
+    return buildList {
+        primaryDcim?.let(::add)
+        screenshots?.let(::add)
+        addAll(others)
+    }
 }
 
 sealed interface MainScreenUiState {

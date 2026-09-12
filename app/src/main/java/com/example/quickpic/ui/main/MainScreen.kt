@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.ContentValues
+import android.content.ContentUris
+import android.provider.MediaStore
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -84,6 +87,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, viewModel: MainScreenViewModel, modifier: Modifier) {
+    val context = LocalContext.current
     var selectedTab by rememberSaveable { mutableIntStateOf(HomeTab.Folders.ordinal) }
     var openFolderPath by rememberSaveable { mutableStateOf<String?>(null) }
     var viewerItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
@@ -96,6 +100,11 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var dateSortOpen by remember { mutableStateOf(false) }
     var rotationOpen by remember { mutableStateOf(false) }
     var detailsItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
+    var renameFolder by remember { mutableStateOf<com.example.quickpic.data.MediaFolder?>(null) }
+    var renameItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
+    var renameError by remember { mutableStateOf<String?>(null) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedMediaIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
     val sortMode by viewModel.selectedSortMode.collectAsStateWithLifecycle()
     val sortDirection by viewModel.selectedSortDirection.collectAsStateWithLifecycle()
@@ -132,16 +141,33 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             modifier = modifier,
             topBar = {
                 TopAppBar(
-                    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     navigationIcon = {
-                        if (selectedFolder != null) IconButton(onClick = { openFolderPath = null }) { Icon(Icons.Default.ArrowBack, "Kembali") }
-                        else IconButton(onClick = { drawerOpen = true }) { Icon(Icons.Default.Menu, "Menu") }
+                        if (selectionMode) {
+                            IconButton(onClick = {
+                                selectionMode = false
+                                selectedMediaIds = emptySet()
+                            }) { Icon(Icons.Default.Close, "Batal memilih") }
+                        } else if (selectedFolder != null) {
+                            IconButton(onClick = { openFolderPath = null }) { Icon(Icons.Default.ArrowBack, "Kembali") }
+                        } else IconButton(onClick = { drawerOpen = true }) { Icon(Icons.Default.Menu, "Menu") }
+                    },
+                    title = {
+                        if (selectionMode) Text("${selectedMediaIds.size} dipilih")
+                        else Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     },
                     actions = {
-                        if (selectedFolder != null) {
-                            IconButton(onClick = { /* selection mode will be added next */ }) { Icon(Icons.Default.Checklist, "Select") }
+                        if (selectionMode) {
+                            IconButton(onClick = {
+                                val folderMedia = selectedFolder?.let { folder -> library.media.filter { it.relativePath == folder.path } } ?: emptyList()
+                                selectedMediaIds = if (selectedMediaIds.size == folderMedia.size) emptySet() else folderMedia.map { it.id }.toSet()
+                            }) { Icon(Icons.Default.SelectAll, "Pilih semua") }
+                        } else if (selectedFolder != null) {
+                            IconButton(onClick = {
+                                selectionMode = true
+                                selectedMediaIds = emptySet()
+                            }) { Icon(Icons.Default.Checklist, "Tandai") }
                         }
-                        Box {
+                        if (!selectionMode) Box {
                             IconButton(onClick = { overflowOpen = true }) { Icon(Icons.Default.MoreVert, "Menu lainnya") }
                             DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
                                 OverflowItem("Tampilan", Icons.Default.GridView) { overflowOpen = false }
@@ -151,7 +177,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                                 if (selectedFolder != null) {
                                     OverflowItem("Sembunyikan", Icons.Default.VisibilityOff) { overflowOpen = false }
                                     OverflowItem("Sembunyikan Folder", Icons.Default.FolderOff) { overflowOpen = false }
-                                    OverflowItem("Ganti nama", Icons.Default.Edit) { overflowOpen = false }
+                                    OverflowItem("Ganti nama", Icons.Default.Edit) { overflowOpen = false; selectedFolder?.let { renameFolder = it } }
                                     OverflowItem("Perbaiki waktu", Icons.Default.Schedule) { overflowOpen = false }
                                     OverflowItem("Tautkan ke beranda", Icons.Default.Home) { overflowOpen = false }
                                 }
@@ -164,7 +190,26 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
         ) { innerPadding ->
             if (selectedFolder != null) {
                 val folderMedia = library.media.filter { it.relativePath == selectedFolder.path }
-                MediaGrid(folderMedia, Modifier.padding(innerPadding), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, onMediaClick = { viewerItems = folderMedia; viewerIndex = it })
+                MediaGrid(
+                    media = folderMedia,
+                    modifier = Modifier.padding(innerPadding),
+                    rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
+                    selectionMode = selectionMode,
+                    selectedMediaIds = selectedMediaIds,
+                    onMediaClick = { index ->
+                        val item = folderMedia[index]
+                        if (selectionMode) {
+                            selectedMediaIds = if (item.id in selectedMediaIds) {
+                                selectedMediaIds - item.id
+                            } else {
+                                selectedMediaIds + item.id
+                            }
+                        } else {
+                            viewerItems = folderMedia
+                            viewerIndex = index
+                        }
+                    },
+                )
             } else {
                 Column(Modifier.fillMaxSize().padding(innerPadding)) {
                     TabRow(selectedTabIndex = selectedTab) {
@@ -173,7 +218,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                         }
                     }
                     when (HomeTab.entries[selectedTab]) {
-                        HomeTab.Folders -> FolderGrid(library.folders) { openFolderPath = it.path }
+                        HomeTab.Folders -> FolderGrid(library.folders, rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }) { openFolderPath = it.path }
                         HomeTab.Photos -> { val list = library.media.filterNot { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, onMediaClick = { viewerItems = list; viewerIndex = it }) }
                         HomeTab.Videos -> { val list = library.media.filter { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, onMediaClick = { viewerItems = list; viewerIndex = it }) }
                     }
@@ -197,12 +242,48 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     }
     if (aboutOpen) AlertDialog(onDismissRequest = { aboutOpen = false }, title = { Text("Tentang") }, text = { Text("Old School QuickPic\nGaleri foto/video offline bergaya QuickPic klasik.") }, confirmButton = { TextButton(onClick = { aboutOpen = false }) { Text("Tutup") } })
     detailsItem?.let { item -> MediaDetailsDialog(item) { detailsItem = null } }
+    renameFolder?.let { folder ->
+        RenameDialog(
+            title = "Ganti nama folder",
+            initialName = folder.displayName,
+            errorMessage = renameError,
+            onDismiss = { renameFolder = null; renameError = null },
+            onRename = { newName ->
+                val result = context.renameMediaFolder(folder, newName)
+                if (result == null) {
+                    renameFolder = null
+                    renameError = null
+                    viewModel.refresh()
+                    val parent = folder.path.trimEnd('/').substringBeforeLast('/', missingDelimiterValue = "")
+                    openFolderPath = if (parent.isBlank()) "${newName.trim()}/" else "$parent/${newName.trim()}/"
+                } else renameError = result
+            },
+        )
+    }
+    renameItem?.let { item ->
+        RenameDialog(
+            title = "Ganti nama",
+            initialName = item.displayName,
+            errorMessage = renameError,
+            onDismiss = { renameItem = null; renameError = null },
+            onRename = { newName ->
+                val result = context.renameMediaItem(item, newName)
+                if (result == null) {
+                    renameItem = null
+                    renameError = null
+                    viewerItems = emptyList()
+                    viewModel.refresh()
+                } else renameError = result
+            },
+        )
+    }
     if (viewerItems.isNotEmpty()) MediaViewer(
         viewerItems,
         viewerIndex,
         onDismiss = { viewerItems = emptyList() },
         onRotateRequest = { rotationOpen = true },
         onDetailsRequest = { if (viewerItems.isNotEmpty()) detailsItem = viewerItems[viewerIndex] },
+        onRenameRequest = { if (viewerItems.isNotEmpty()) renameItem = viewerItems[viewerIndex] },
         rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
     )
     if (rotationOpen) {
@@ -294,12 +375,22 @@ private fun RotationOption(label: String, degrees: Int, onSelect: (Int) -> Unit)
 @Composable private fun HomeTab.icon() = when (this) { HomeTab.Folders -> Icons.Default.Folder; HomeTab.Photos -> Icons.Default.Image; HomeTab.Videos -> Icons.Default.Movie }
 private fun HomeTab.label() = when (this) { HomeTab.Folders -> "Folder"; HomeTab.Photos -> "Foto"; HomeTab.Videos -> "Video" }
 
-@Composable private fun FolderGrid(folders: List<com.example.quickpic.data.MediaFolder>, onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit) {
+@Composable
+private fun FolderGrid(
+    folders: List<com.example.quickpic.data.MediaFolder>,
+    rotationDegrees: (Uri) -> Int = { 0 },
+    onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
+) {
     if (folders.isEmpty()) { EmptyState("Tidak ada folder foto/video."); return }
-    LazyVerticalGrid(columns = GridCells.Adaptive(150.dp), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { items(folders, key = { it.path }) { FolderCard(it, onFolderClick) } }
+    LazyVerticalGrid(columns = GridCells.Adaptive(150.dp), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { items(folders, key = { it.path }) { folder -> FolderCard(folder, rotationDegrees(folder.thumbnail), onFolderClick) } }
 }
-@Composable private fun FolderCard(folder: com.example.quickpic.data.MediaFolder, onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit) = Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onFolderClick(folder) }.semantics { contentDescription = "Folder ${folder.displayName}" }) {
-    MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp))
+@Composable
+private fun FolderCard(
+    folder: com.example.quickpic.data.MediaFolder,
+    rotationDegrees: Int = 0,
+    onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
+) = Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onFolderClick(folder) }.semantics { contentDescription = "Folder ${folder.displayName}" }) {
+    MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees)
     Row(Modifier.fillMaxWidth().padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Folder, null, Modifier.size(20.dp)); Spacer(Modifier.width(7.dp)); Column(Modifier.weight(1f)) { Text(folder.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text("${folder.totalCount} item", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
 }
 
@@ -307,17 +398,61 @@ private fun HomeTab.label() = when (this) { HomeTab.Folders -> "Folder"; HomeTab
     media: List<com.example.quickpic.data.MediaItem>,
     modifier: Modifier = Modifier,
     rotationDegrees: (Uri) -> Int = { 0 },
+    selectionMode: Boolean = false,
+    selectedMediaIds: Set<Long> = emptySet(),
     onMediaClick: (Int) -> Unit,
 ) {
     if (media.isEmpty()) { EmptyState("Tidak ada media di sini.", modifier); return }
     LazyVerticalGrid(columns = GridCells.Adaptive(120.dp), modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        items(media, key = { it.id }) { item -> MediaThumbnail(item, rotationDegrees(item.uri)) { onMediaClick(media.indexOf(item)) } }
+        items(media, key = { it.id }) { item ->
+            MediaThumbnail(
+                item = item,
+                rotationDegrees = rotationDegrees(item.uri),
+                selectionMode = selectionMode,
+                selected = item.id in selectedMediaIds,
+            ) { onMediaClick(media.indexOf(item)) }
+        }
     }
 }
-@Composable private fun MediaThumbnail(item: com.example.quickpic.data.MediaItem, rotationDegrees: Int = 0, onClick: () -> Unit) = Box(Modifier.fillMaxWidth().height(140.dp).semantics { contentDescription = item.displayName }.clickable(onClick = onClick)) {
+@Composable private fun MediaThumbnail(
+    item: com.example.quickpic.data.MediaItem,
+    rotationDegrees: Int = 0,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onClick: () -> Unit,
+) = Box(
+    Modifier
+        .fillMaxWidth()
+        .height(140.dp)
+        .semantics { contentDescription = item.displayName }
+        .clickable(onClick = onClick)
+) {
     MediaThumbnailImage(item.uri, item.displayName, Modifier.fillMaxSize(), rotationDegrees)
-    if (item.isVideo) { Surface(Modifier.align(Alignment.TopStart), color = MaterialTheme.colorScheme.scrim.copy(alpha = .7f)) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Movie, null, Modifier.size(16.dp), tint = Color.White); Text(" VIDEO", Modifier.padding(end = 6.dp, top = 3.dp, bottom = 3.dp), color = Color.White, style = MaterialTheme.typography.labelSmall) } }; Icon(Icons.Default.PlayArrow, "Putar video", Modifier.align(Alignment.Center).size(48.dp), tint = Color.White) }
+    if (item.isVideo) {
+        Surface(Modifier.align(Alignment.TopStart), color = MaterialTheme.colorScheme.scrim.copy(alpha = .7f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Movie, null, Modifier.size(16.dp), tint = Color.White)
+                Text(" VIDEO", Modifier.padding(end = 6.dp, top = 3.dp, bottom = 3.dp), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (!selectionMode) Icon(Icons.Default.PlayArrow, "Putar video", Modifier.align(Alignment.Center).size(48.dp), tint = Color.White)
+    }
     Text(item.displayName, Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(MaterialTheme.colorScheme.scrim.copy(alpha = .7f)).padding(6.dp, 3.dp), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+    if (selectionMode) {
+        Surface(
+            modifier = Modifier.align(Alignment.TopEnd).padding(7.dp).size(28.dp),
+            shape = RoundedCornerShape(50),
+            color = if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = .55f),
+            tonalElevation = 2.dp,
+        ) {
+            Icon(
+                imageVector = if (selected) Icons.Default.Check else Icons.Default.RadioButtonUnchecked,
+                contentDescription = if (selected) "Ditandai" else "Belum ditandai",
+                tint = if (selected) MaterialTheme.colorScheme.onPrimary else Color.White,
+                modifier = Modifier.padding(4.dp),
+            )
+        }
+    }
 }
 @Composable
 private fun MediaThumbnailImage(
@@ -348,6 +483,7 @@ private fun MediaThumbnailImage(
     onDismiss: () -> Unit,
     onRotateRequest: () -> Unit,
     onDetailsRequest: () -> Unit,
+    onRenameRequest: () -> Unit,
     rotationDegrees: (Uri) -> Int,
 ) {
     val context = LocalContext.current
@@ -421,7 +557,7 @@ private fun MediaThumbnailImage(
                                 DropdownMenuItem(text = { Text("Gunakan sebagai") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Pindah ke") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Salin ke") }, onClick = { viewerOverflowOpen = false })
-                                DropdownMenuItem(text = { Text("Ganti nama") }, onClick = { viewerOverflowOpen = false })
+                                DropdownMenuItem(text = { Text("Ganti nama") }, onClick = { viewerOverflowOpen = false; onRenameRequest() })
                                 DropdownMenuItem(text = { Text("Lihat di peta") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Pengaturan") }, onClick = { viewerOverflowOpen = false })
                             }
@@ -545,6 +681,77 @@ private fun formatDuration(ms: Long): String {
     val minutes = totalSeconds / 60 % 60
     val hours = totalSeconds / 3600
     return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds) else "%d:%02d".format(minutes, seconds)
+}
+
+private fun Context.renameMediaItem(item: com.example.quickpic.data.MediaItem, requestedName: String): String? {
+    val trimmed = requestedName.trim()
+    if (trimmed.isBlank()) return "Nama tidak boleh kosong."
+    if (trimmed.contains("/") || trimmed.contains("\\")) return "Nama tidak boleh mengandung karakter /."
+    if (trimmed == item.displayName) return null
+    return runCatching {
+        val values = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, trimmed) }
+        val updated = contentResolver.update(item.uri, values, null, null)
+        if (updated != 1) "File tidak dapat diganti nama." else null
+    }.getOrElse { "Gagal mengganti nama: ${it.message ?: "akses ditolak"}" }
+}
+
+private fun Context.renameMediaFolder(folder: com.example.quickpic.data.MediaFolder, requestedName: String): String? {
+    val trimmed = requestedName.trim()
+    if (trimmed.isBlank()) return "Nama folder tidak boleh kosong."
+    if (trimmed.contains("/") || trimmed.contains("\\")) return "Nama folder tidak boleh mengandung karakter /."
+    val parent = folder.path.trimEnd('/').substringBeforeLast('/', missingDelimiterValue = "")
+    val newPath = if (parent.isBlank()) "$trimmed/" else "$parent/$trimmed/"
+    if (newPath.equals(folder.path, ignoreCase = true)) return null
+    return runCatching {
+        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val items = contentResolver.query(
+            collection,
+            arrayOf(MediaStore.Files.FileColumns._ID),
+            "${MediaStore.Files.FileColumns.RELATIVE_PATH}=?",
+            arrayOf(folder.path),
+            null,
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            buildList { while (cursor.moveToNext()) add(cursor.getLong(idColumn)) }
+        } ?: emptyList()
+        if (items.isEmpty()) return@runCatching "Folder kosong atau sudah berubah."
+        val values = ContentValues().apply { put(MediaStore.Files.FileColumns.RELATIVE_PATH, newPath) }
+        var changed = 0
+        items.forEach { id ->
+            val uri = ContentUris.withAppendedId(collection, id)
+            changed += contentResolver.update(uri, values, null, null)
+        }
+        if (changed != items.size) "Sebagian isi folder tidak dapat dipindahkan. Folder belum diganti nama sepenuhnya." else null
+    }.getOrElse { "Gagal mengganti nama folder: ${it.message ?: "akses ditolak"}" }
+}
+
+@Composable
+private fun RenameDialog(
+    title: String,
+    initialName: String,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit,
+) {
+    var name by remember(initialName) { mutableStateOf(initialName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text("Nama baru") },
+                    isError = errorMessage != null,
+                    supportingText = errorMessage?.let { { Text(it) } },
+                )
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Batal") } },
+        confirmButton = { TextButton(onClick = { onRename(name) }, enabled = name.trim().isNotEmpty()) { Text("Simpan") } },
+    )
 }
 
 private fun Context.shareMedia(uri: Uri) {

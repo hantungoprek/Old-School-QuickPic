@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.quickpic"
         minSdk = 29
         targetSdk = 35
-        versionCode = 10
-        versionName = "2.5.1"
+        versionCode = 14
+        versionName = "2.5.5"
     }
 
     buildTypes {
