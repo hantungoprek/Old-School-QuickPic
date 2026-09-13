@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -67,7 +68,7 @@ private enum class HomeTab { Folders, Photos, Videos }
 @Composable
 fun MainScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val viewModel: MainScreenViewModel = viewModel { MainScreenViewModel(com.example.quickpic.data.DefaultDataRepository(context.applicationContext)) }
+    val viewModel: MainScreenViewModel = viewModel { MainScreenViewModel(context.applicationContext, com.example.quickpic.data.DefaultDataRepository(context.applicationContext)) }
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val hasPermission = context.hasMediaPermission()
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { viewModel.refresh() }
@@ -96,16 +97,54 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var aboutOpen by remember { mutableStateOf(false) }
     var overflowOpen by remember { mutableStateOf(false) }
+    var selectionOverflowOpen by remember { mutableStateOf(false) }
     var sortOpen by remember { mutableStateOf(false) }
     var dateSortOpen by remember { mutableStateOf(false) }
+    var nameSortOpen by remember { mutableStateOf(false) }
     var rotationOpen by remember { mutableStateOf(false) }
     var detailsItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var renameFolder by remember { mutableStateOf<com.example.quickpic.data.MediaFolder?>(null) }
     var renameItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var renameError by remember { mutableStateOf<String?>(null) }
+    var deleteItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
+    var pendingDeleteUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedMediaIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
+    // Dideklarasikan lebih dulu agar callback launcher dapat memanggil launcher
+    // yang sama saat Android 10 meminta persetujuan penghapusan berikutnya.
+    var deleteLauncher: androidx.activity.result.ActivityResultLauncher<IntentSenderRequest>? = null
+    deleteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && result.resultCode == Activity.RESULT_OK && pendingDeleteUris.isNotEmpty()) {
+            // Android 10 memberikan izin untuk item yang memicu dialog.
+            // Lanjutkan hanya dari daftar yang BELUM selesai; jangan mengulang
+            // URI yang sudah berhasil dihapus karena delete() akan mengembalikan 0.
+            val completed = context.deleteMediaItems(
+                pendingDeleteUris,
+                deleteLauncher,
+                onPermissionRequired = { remaining, sender ->
+                    pendingDeleteUris = remaining
+                    deleteLauncher?.launch(IntentSenderRequest.Builder(sender).build())
+                },
+            )
+            if (completed) {
+                pendingDeleteUris = emptyList()
+                selectionMode = false
+                selectedMediaIds = emptySet()
+                viewModel.refresh()
+            }
+        } else {
+            // Android 11+ menyelesaikan seluruh batch lewat satu dialog sistem.
+            // Jika pengguna membatalkan, jangan mengubah selection.
+            pendingDeleteUris = emptyList()
+            if (result.resultCode == Activity.RESULT_OK) {
+                selectionMode = false
+                selectedMediaIds = emptySet()
+                viewModel.refresh()
+            }
+        }
+        deleteItems = emptyList()
+    }
     val sortMode by viewModel.selectedSortMode.collectAsStateWithLifecycle()
     val sortDirection by viewModel.selectedSortDirection.collectAsStateWithLifecycle()
 
@@ -157,10 +196,78 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     },
                     actions = {
                         if (selectionMode) {
+                            val selectedItems = library.media.filter { it.id in selectedMediaIds }
+
+                            // Tombol aksi utama dibuat langsung di TopAppBar, mengikuti alur QuickPic lama.
+                            IconButton(
+                                onClick = { context.shareMedia(selectedItems.map { it.uri }) },
+                                enabled = selectedItems.isNotEmpty(),
+                            ) {
+                                Icon(Icons.Default.Share, "Bagikan")
+                            }
+                            IconButton(
+                                onClick = { deleteItems = selectedItems },
+                                enabled = selectedItems.isNotEmpty(),
+                            ) {
+                                Icon(Icons.Default.Delete, "Hapus")
+                            }
                             IconButton(onClick = {
                                 val folderMedia = selectedFolder?.let { folder -> library.media.filter { it.relativePath == folder.path } } ?: emptyList()
                                 selectedMediaIds = if (selectedMediaIds.size == folderMedia.size) emptySet() else folderMedia.map { it.id }.toSet()
                             }) { Icon(Icons.Default.SelectAll, "Pilih semua") }
+                            Box {
+                                IconButton(onClick = { selectionOverflowOpen = true }) { Icon(Icons.Default.MoreVert, "Menu lainnya") }
+                                DropdownMenu(
+                                    expanded = selectionOverflowOpen,
+                                    onDismissRequest = { selectionOverflowOpen = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Rincian") },
+                                        leadingIcon = { Icon(Icons.Default.Info, null) },
+                                        enabled = selectedItems.size == 1,
+                                        onClick = {
+                                            selectionOverflowOpen = false
+                                            selectedItems.firstOrNull()?.let { detailsItem = it }
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Pindah ke") },
+                                        leadingIcon = { Icon(Icons.Default.DriveFileMove, null) },
+                                        enabled = selectedItems.isNotEmpty(),
+                                        onClick = {
+                                            selectionOverflowOpen = false
+                                            // UI disiapkan dulu. Logika pemindahan file akan dibuat pada tahap berikutnya.
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Salin ke") },
+                                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                                        enabled = selectedItems.isNotEmpty(),
+                                        onClick = {
+                                            selectionOverflowOpen = false
+                                            // UI disiapkan dulu. Logika penyalinan file akan dibuat pada tahap berikutnya.
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Ganti nama") },
+                                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                                        enabled = selectedItems.size == 1,
+                                        onClick = {
+                                            selectionOverflowOpen = false
+                                            selectedItems.firstOrNull()?.let { renameItem = it }
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Pilih semua") },
+                                        leadingIcon = { Icon(Icons.Default.SelectAll, null) },
+                                        onClick = {
+                                            selectionOverflowOpen = false
+                                            val folderMedia = selectedFolder?.let { folder -> library.media.filter { it.relativePath == folder.path } } ?: emptyList()
+                                            selectedMediaIds = folderMedia.map { it.id }.toSet()
+                                        },
+                                    )
+                                }
+                            }
                         } else if (selectedFolder != null) {
                             IconButton(onClick = {
                                 selectionMode = true
@@ -228,9 +335,23 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     }
 
     if (sortOpen) {
-        SortDialog(sortMode) { mode ->
+        SortDialog(
+            current = sortMode,
+            onDismiss = { sortOpen = false },
+        ) { mode ->
             sortOpen = false
-            if (mode == SortMode.DATE) dateSortOpen = true else viewModel.setSortMode(mode)
+            when (mode) {
+                SortMode.NAME -> nameSortOpen = true
+                SortMode.DATE -> dateSortOpen = true
+                SortMode.FLOW -> viewModel.setSortMode(SortMode.FLOW)
+            }
+        }
+    }
+    if (nameSortOpen) {
+        NameSortDialog(sortDirection) { direction ->
+            viewModel.setSortMode(SortMode.NAME)
+            viewModel.setSortDirection(direction)
+            nameSortOpen = false
         }
     }
     if (dateSortOpen) {
@@ -242,6 +363,43 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     }
     if (aboutOpen) AlertDialog(onDismissRequest = { aboutOpen = false }, title = { Text("Tentang") }, text = { Text("Old School QuickPic\nGaleri foto/video offline bergaya QuickPic klasik.") }, confirmButton = { TextButton(onClick = { aboutOpen = false }) { Text("Tutup") } })
     detailsItem?.let { item -> MediaDetailsDialog(item) { detailsItem = null } }
+    if (deleteItems.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { deleteItems = emptyList() },
+            title = { Text("Hapus file?") },
+            text = {
+                Text(
+                    if (deleteItems.size == 1)
+                        "File ini akan dihapus dari perangkat."
+                    else
+                        "${deleteItems.size} file akan dihapus dari perangkat."
+                )
+            },
+            dismissButton = { TextButton(onClick = { deleteItems = emptyList() }) { Text("Batal") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    val itemsToDelete = deleteItems
+                    deleteItems = emptyList()
+                    val urisToDelete = itemsToDelete.map { it.uri }.distinct()
+                    pendingDeleteUris = urisToDelete
+                    if (context.deleteMediaItems(
+                            urisToDelete,
+                            deleteLauncher,
+                            onPermissionRequired = { remaining, sender ->
+                                pendingDeleteUris = remaining
+                                deleteLauncher?.launch(IntentSenderRequest.Builder(sender).build())
+                            },
+                        )
+                    ) {
+                        pendingDeleteUris = emptyList()
+                        selectionMode = false
+                        selectedMediaIds = emptySet()
+                        viewModel.refresh()
+                    }
+                }) { Text("Hapus") }
+            },
+        )
+    }
     renameFolder?.let { folder ->
         RenameDialog(
             title = "Ganti nama folder",
@@ -301,15 +459,30 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
 @Composable private fun DrawerItem(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, selected: Boolean, onClick: () -> Unit) = NavigationDrawerItem(label = { Text(label) }, selected = selected, onClick = onClick, icon = { Icon(icon, null) }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
 @Composable private fun OverflowItem(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) = DropdownMenuItem(text = { Text(label) }, leadingIcon = { Icon(icon, null) }, onClick = onClick)
 
-@Composable private fun SortDialog(current: SortMode, onSelect: (SortMode) -> Unit) {
+@Composable private fun SortDialog(current: SortMode, onDismiss: () -> Unit, onSelect: (SortMode) -> Unit) {
     AlertDialog(
-        onDismissRequest = { onSelect(current) },
+        onDismissRequest = onDismiss,
         title = { Text("Urutkan") },
         text = {
             Column {
-                SortOption("Nama", SortMode.NAME, current, onSelect)
+                SortOption("Nama", SortMode.NAME, current, onSelect, showSubmenu = true)
                 SortOption("Tanggal", SortMode.DATE, current, onSelect, showSubmenu = true)
                 SortOption("Alur", SortMode.FLOW, current, onSelect)
+            }
+        },
+        confirmButton = {},
+    )
+}
+
+@Composable
+private fun NameSortDialog(current: SortDirection, onSelect: (SortDirection) -> Unit) {
+    AlertDialog(
+        onDismissRequest = { onSelect(current) },
+        title = { Text("Urutkan berdasarkan nama") },
+        text = {
+            Column {
+                DirectionOption("A → Z", SortDirection.ASCENDING, current, onSelect)
+                DirectionOption("Z → A", SortDirection.DESCENDING, current, onSelect)
             }
         },
         confirmButton = {},
@@ -754,10 +927,93 @@ private fun RenameDialog(
     )
 }
 
-private fun Context.shareMedia(uri: Uri) {
+private fun Context.shareMedia(uri: Uri) = shareMedia(listOf(uri))
+
+private fun Context.shareMedia(uris: List<Uri>) {
+    if (uris.isEmpty()) return
     runCatching {
-        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "*/*"; putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, "Bagikan media"))
+        val intent = if (uris.size == 1) {
+            Intent(Intent.ACTION_SEND).apply {
+                type = "*/*"
+                putExtra(Intent.EXTRA_STREAM, uris.first())
+            }
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+            }
+        }.apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        startActivity(Intent.createChooser(intent, "Bagikan media"))
     }
+}
+
+private fun Context.deleteMediaItems(
+    uris: List<Uri>,
+    launcher: androidx.activity.result.ActivityResultLauncher<IntentSenderRequest>?,
+    onPermissionRequired: (remainingUris: List<Uri>, sender: android.content.IntentSender) -> Unit,
+): Boolean {
+    val uniqueUris = uris.distinct()
+    if (uniqueUris.isEmpty()) return true
+
+    // Android 11+ dapat meminta satu persetujuan sistem untuk seluruh batch.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        return runCatching {
+            val request = MediaStore.createDeleteRequest(contentResolver, uniqueUris)
+            launcher?.launch(IntentSenderRequest.Builder(request.intentSender).build()) ?: return false
+            false
+        }.getOrElse {
+            android.widget.Toast.makeText(
+                this,
+                "File tidak dapat dihapus: ${it.message ?: "akses ditolak"}",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            false
+        }
+    }
+
+    // Android 10 (API 29) dapat meminta persetujuan satu file melalui
+    // RecoverableSecurityException. Proses dilakukan berurutan.
+    // PENTING: ketika satu file berhasil dihapus, file tersebut langsung
+    // dikeluarkan dari queue. Kalau queue lama diulang dari awal, delete()
+    // terhadap URI yang sudah hilang mengembalikan 0 dan menghasilkan pesan
+    // palsu "Sebagian file tidak dapat dihapus".
+    for (index in uniqueUris.indices) {
+        val uri = uniqueUris[index]
+        try {
+            val deleted = contentResolver.delete(uri, null, null)
+            if (deleted <= 0) {
+                // A URI can already be gone after a previous approved request.
+                // Treat that as success instead of turning the whole batch into
+                // the misleading "Sebagian file tidak dapat dihapus" state.
+                val stillExists = runCatching {
+                    contentResolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)?.use { it.moveToFirst() } == true
+                }.getOrDefault(false)
+                if (stillExists) {
+                    android.widget.Toast.makeText(
+                        this,
+                        "File tidak dapat dihapus. Pastikan izin penyimpanan diberikan.",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                    return false
+                }
+            }
+        } catch (error: Throwable) {
+            if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && error is android.app.RecoverableSecurityException) {
+                val remaining = uniqueUris.drop(index)
+                if (remaining.isEmpty()) return true
+                onPermissionRequired(remaining, error.userAction.actionIntent.intentSender)
+                return false
+            }
+            android.widget.Toast.makeText(
+                this,
+                "Gagal menghapus file: ${error.message ?: "akses ditolak"}",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            return false
+        }
+    }
+
+    return true
 }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -780,5 +1036,15 @@ private fun Context.shareMedia(uri: Uri) {
 @Composable private fun ErrorMessage(message: String, modifier: Modifier) = Box(modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(message) }
 
 private fun Context.hasMediaPermission() = mediaPermissions().all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
-private fun mediaPermissions() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+private fun mediaPermissions(): Array<String> = when {
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+        Manifest.permission.READ_MEDIA_IMAGES,
+        Manifest.permission.READ_MEDIA_VIDEO,
+    )
+    Build.VERSION.SDK_INT == Build.VERSION_CODES.Q -> arrayOf(
+        Manifest.permission.READ_EXTERNAL_STORAGE,
+        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+    )
+    else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+}
 private fun Context.findActivity(): Activity? { var c: Context = this; while (c is android.content.ContextWrapper) { if (c is Activity) return c; c = c.baseContext }; return null }

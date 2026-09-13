@@ -1,5 +1,6 @@
 package com.example.quickpic.ui.main
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.quickpic.data.DataRepository
@@ -20,10 +21,17 @@ import kotlinx.coroutines.flow.stateIn
 enum class SortMode { NAME, DATE, FLOW }
 enum class SortDirection { ASCENDING, DESCENDING }
 
-class MainScreenViewModel(dataRepository: DataRepository) : ViewModel() {
+class MainScreenViewModel(context: Context, dataRepository: DataRepository) : ViewModel() {
+    private val preferences = context.getSharedPreferences("quickpic_preferences", Context.MODE_PRIVATE)
     private val refreshRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    private val sortMode = MutableStateFlow(SortMode.NAME)
-    private val sortDirection = MutableStateFlow(SortDirection.ASCENDING)
+    private val sortMode = MutableStateFlow(
+        runCatching { SortMode.valueOf(preferences.getString("sort_mode", SortMode.NAME.name) ?: SortMode.NAME.name) }
+            .getOrDefault(SortMode.NAME)
+    )
+    private val sortDirection = MutableStateFlow(
+        runCatching { SortDirection.valueOf(preferences.getString("sort_direction", SortDirection.ASCENDING.name) ?: SortDirection.ASCENDING.name) }
+            .getOrDefault(SortDirection.ASCENDING)
+    )
 
     val selectedSortMode: StateFlow<SortMode> = sortMode
     val selectedSortDirection: StateFlow<SortDirection> = sortDirection
@@ -40,21 +48,32 @@ class MainScreenViewModel(dataRepository: DataRepository) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainScreenUiState.Loading)
 
     fun refresh() = refreshRequests.tryEmit(Unit)
-    fun setSortMode(mode: SortMode) { sortMode.value = mode }
-    fun setSortDirection(direction: SortDirection) { sortDirection.value = direction }
+    fun setSortMode(mode: SortMode) {
+        sortMode.value = mode
+        preferences.edit().putString("sort_mode", mode.name).apply()
+    }
+
+    fun setSortDirection(direction: SortDirection) {
+        sortDirection.value = direction
+        preferences.edit().putString("sort_direction", direction.name).apply()
+    }
 }
 
 private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): MediaLibrary = when (mode) {
-    SortMode.NAME -> copy(
-        folders = pinStandardFolders(folders.sortedWith(
+    SortMode.NAME -> {
+        val sortedFolders = folders.sortedWith(
             compareBy<MediaFolder> { it.displayName.lowercase() }
                 .thenBy { it.path }
-        )),
-        media = media.sortedWith(
+        )
+        val sortedMedia = media.sortedWith(
             compareBy<MediaItem> { it.displayName.lowercase() }
                 .thenBy { it.id }
-        ),
-    )
+        )
+        copy(
+            folders = pinStandardFolders(if (direction == SortDirection.DESCENDING) sortedFolders.asReversed() else sortedFolders),
+            media = if (direction == SortDirection.DESCENDING) sortedMedia.asReversed() else sortedMedia,
+        )
+    }
 
     SortMode.DATE -> {
         val newestByFolder: Map<String, Long> = media
