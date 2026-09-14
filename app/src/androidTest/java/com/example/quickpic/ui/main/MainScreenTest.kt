@@ -16,7 +16,7 @@ class MainScreenTest {
 
   @Before
   fun setup() {
-    composeTestRule.setContent { MediaGrid(FAKE_DATA) }
+    composeTestRule.setContent { MediaGrid(FAKE_DATA, onMediaClick = {}) }
   }
 
   @Test
@@ -26,6 +26,6 @@ class MainScreenTest {
 }
 
 private val FAKE_DATA = listOf(
-  MediaItem(1, Uri.parse("content://media/1"), "Sample1", "image/jpeg", 0, 0),
-  MediaItem(2, Uri.parse("content://media/2"), "Sample2", "video/mp4", 0, 0),
+  MediaItem(1, Uri.parse("content://media/1"), "Sample1", "image/jpeg", 0, 0, 0, "Pictures/"),
+  MediaItem(2, Uri.parse("content://media/2"), "Sample2", "video/mp4", 0, 0, 0, "Movies/"),
 )

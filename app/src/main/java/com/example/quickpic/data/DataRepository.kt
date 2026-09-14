@@ -97,7 +97,19 @@ private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
                 add(
                     MediaItem(
                         id = id,
-                        uri = ContentUris.withAppendedId(collection, id),
+                        // Querying Files is useful for one combined image/video
+                        // library, but the URI handed to the rest of the app must
+                        // remain in its real media collection.  In particular,
+                        // opening a Video URI is more reliable than opening the
+                        // read-only Files aggregation URI on scoped storage.
+                        uri = ContentUris.withAppendedId(
+                            if (mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO) {
+                                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                            } else {
+                                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                            },
+                            id,
+                        ),
                         displayName = cursor.getString(nameColumn) ?: "Untitled media",
                         mimeType = mimeType,
                         dateAddedSeconds = cursor.getLong(dateAddedColumn),
