@@ -8,10 +8,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.ContentValues
 import android.content.ContentUris
+import android.media.MediaScannerConnection
 import android.provider.MediaStore
 import android.provider.DocumentsContract
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.IntentSenderRequest
@@ -50,9 +52,10 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.ImageLoader
+import coil.request.ImageRequest
+import androidx.core.graphics.drawable.toBitmap
 import coil.compose.AsyncImage
-import coil.decode.VideoFrameDecoder
+import coil.imageLoader
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem as ExoMediaItem
@@ -64,6 +67,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
+import java.io.File
+import java.io.InputStream
 
 private enum class HomeTab { Folders, Photos, Videos }
 
@@ -112,11 +117,18 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var renameError by remember { mutableStateOf<String?>(null) }
     var deleteItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
     var pendingDeleteUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingMoveSourceUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var copyItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
     var copyDestinationOpen by remember { mutableStateOf(false) }
     var copyBusy by remember { mutableStateOf(false) }
     var copyFailureMessage by remember { mutableStateOf<String?>(null) }
     var pendingTreeCopyItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
+    var moveItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
+    var moveDestinationOpen by remember { mutableStateOf(false) }
+    var moveBusy by remember { mutableStateOf(false) }
+    var moveFailureMessage by remember { mutableStateOf<String?>(null) }
+    var pendingTreeMoveItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
+    var pendingTreeMoveDestinationPath by remember { mutableStateOf<String?>(null) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedMediaIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
@@ -124,6 +136,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     // yang sama saat Android 10 meminta persetujuan penghapusan berikutnya.
     var deleteLauncher: androidx.activity.result.ActivityResultLauncher<IntentSenderRequest>? = null
     deleteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        val moving = pendingMoveSourceUris.isNotEmpty()
         if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && result.resultCode == Activity.RESULT_OK && pendingDeleteUris.isNotEmpty()) {
             // Android 10 memberikan izin untuk item yang memicu dialog.
             // Lanjutkan hanya dari daftar yang BELUM selesai; jangan mengulang
@@ -138,18 +151,36 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             )
             if (completed) {
                 pendingDeleteUris = emptyList()
+                pendingMoveSourceUris = emptyList()
+                moveBusy = false
                 selectionMode = false
                 selectedMediaIds = emptySet()
                 viewModel.refresh()
+                scope.launch { delay(750); viewModel.refresh() }
+                if (moving) {
+                    moveItems = emptyList()
+                    android.widget.Toast.makeText(context, "File berhasil dipindahkan.", android.widget.Toast.LENGTH_SHORT).show()
+                }
             }
         } else {
             // Android 11+ menyelesaikan seluruh batch lewat satu dialog sistem.
             // Jika pengguna membatalkan, jangan mengubah selection.
             pendingDeleteUris = emptyList()
             if (result.resultCode == Activity.RESULT_OK) {
+                pendingMoveSourceUris = emptyList()
+                moveBusy = false
                 selectionMode = false
                 selectedMediaIds = emptySet()
                 viewModel.refresh()
+                scope.launch { delay(750); viewModel.refresh() }
+                if (moving) {
+                    moveItems = emptyList()
+                    android.widget.Toast.makeText(context, "File berhasil dipindahkan.", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } else if (moving) {
+                pendingMoveSourceUris = emptyList()
+                moveBusy = false
+                android.widget.Toast.makeText(context, "Penghapusan sumber dibatalkan; file hasil salin tetap ada.", android.widget.Toast.LENGTH_LONG).show()
             }
         }
         deleteItems = emptyList()
@@ -165,6 +196,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             selectionMode = false
             selectedMediaIds = emptySet()
             viewModel.refresh()
+            scope.launch { delay(750); viewModel.refresh() }
             android.widget.Toast.makeText(context, "${result.copied} file berhasil disalin.", android.widget.Toast.LENGTH_SHORT).show()
         } else {
             viewModel.refresh()
@@ -180,6 +212,40 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             ).show()
         }
     }
+    val requestMoveDeletion: (List<com.example.quickpic.data.MediaItem>) -> Unit = { sourceItems ->
+        pendingMoveSourceUris = sourceItems.map { it.uri }
+        moveDestinationOpen = false
+        val completedImmediately = context.deleteMediaItems(
+            pendingMoveSourceUris,
+            deleteLauncher,
+            onPermissionRequired = { remaining, sender ->
+                pendingDeleteUris = remaining
+                deleteLauncher?.launch(IntentSenderRequest.Builder(sender).build())
+            },
+        )
+        if (completedImmediately) {
+            pendingMoveSourceUris = emptyList()
+            moveBusy = false
+            moveItems = emptyList()
+            selectionMode = false
+            selectedMediaIds = emptySet()
+            viewModel.refresh()
+            scope.launch { delay(750); viewModel.refresh() }
+            android.widget.Toast.makeText(context, "${sourceItems.size} file berhasil dipindahkan.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    val completePreparedMove: (CopyResult, List<com.example.quickpic.data.MediaItem>) -> Unit = { result, sourceItems ->
+        if (result.failed == 0) {
+            // A move is deliberately copy-then-delete. The source is only
+            // removed after the destination has been reopened and verified.
+            requestMoveDeletion(sourceItems)
+        } else {
+            moveBusy = false
+            viewModel.refresh()
+            moveFailureMessage = result.failureMessage("dipindahkan")
+            android.widget.Toast.makeText(context, "Pemindahan gagal. Sumber tidak dihapus.", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
     val treeCopyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
         val itemsToCopy = pendingTreeCopyItems
         pendingTreeCopyItems = emptyList()
@@ -192,6 +258,23 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     context.copyMediaItemsToTree(itemsToCopy, treeUri)
                 }
                 completeCopy(result)
+            }
+        }
+    }
+    val treeMoveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        val itemsToMove = pendingTreeMoveItems
+        val destinationPath = pendingTreeMoveDestinationPath
+        pendingTreeMoveItems = emptyList()
+        pendingTreeMoveDestinationPath = null
+        if (treeUri == null || itemsToMove.isEmpty()) {
+            moveBusy = false
+            android.widget.Toast.makeText(context, "Pemilihan folder dibatalkan.", android.widget.Toast.LENGTH_SHORT).show()
+        } else {
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    context.copyMediaItemsToTree(itemsToMove, treeUri, destinationPath)
+                }
+                completePreparedMove(result, itemsToMove)
             }
         }
     }
@@ -282,7 +365,8 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                                         enabled = selectedItems.isNotEmpty(),
                                         onClick = {
                                             selectionOverflowOpen = false
-                                            // UI disiapkan dulu. Logika pemindahan file akan dibuat pada tahap berikutnya.
+                                            moveItems = selectedItems
+                                            moveDestinationOpen = true
                                         },
                                     )
                                     DropdownMenuItem(
@@ -412,6 +496,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     detailsItem?.let { item -> MediaDetailsDialog(item) { detailsItem = null } }
     if (copyDestinationOpen) {
         CopyDestinationDialog(
+            title = "Salin ke",
             folders = library.folders,
             enabled = !copyBusy,
             onDismiss = {
@@ -449,8 +534,47 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             },
         )
     }
+    if (moveDestinationOpen) {
+        CopyDestinationDialog(
+            title = "Pindah ke",
+            folders = library.folders,
+            enabled = !moveBusy,
+            onDismiss = {
+                if (!moveBusy) {
+                    moveDestinationOpen = false
+                    moveItems = emptyList()
+                }
+            },
+            onFolderSelected = { destination ->
+                if (!moveBusy) {
+                    val itemsToMove = moveItems
+                    moveBusy = true
+                    if (itemsToMove.any { it.isVideo } && destination.path.startsWith("Pictures/", ignoreCase = true)) {
+                        pendingTreeMoveItems = itemsToMove
+                        pendingTreeMoveDestinationPath = destination.path
+                        android.widget.Toast.makeText(
+                            context,
+                            "Pilih folder Pictures/Screenshots pada pemilih folder Android.",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                        treeMoveLauncher.launch(null)
+                    } else {
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                context.copyMediaItems(itemsToMove, destination.path)
+                            }
+                            completePreparedMove(result, itemsToMove)
+                        }
+                    }
+                }
+            },
+        )
+    }
     copyFailureMessage?.let { message ->
         CopyFailureDialog(message = message) { copyFailureMessage = null }
+    }
+    moveFailureMessage?.let { message ->
+        CopyFailureDialog(title = "Pindah gagal", message = message) { moveFailureMessage = null }
     }
 
     if (deleteItems.isNotEmpty()) {
@@ -532,6 +656,12 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
         onRotateRequest = { rotationOpen = true },
         onDetailsRequest = { if (viewerItems.isNotEmpty()) detailsItem = viewerItems[viewerIndex] },
         onRenameRequest = { if (viewerItems.isNotEmpty()) renameItem = viewerItems[viewerIndex] },
+        onMoveRequest = {
+            if (viewerItems.isNotEmpty()) {
+                moveItems = listOf(viewerItems[viewerIndex])
+                moveDestinationOpen = true
+            }
+        },
         rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
     )
     if (rotationOpen) {
@@ -653,7 +783,7 @@ private fun FolderCard(
     rotationDegrees: Int = 0,
     onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
 ) = Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onFolderClick(folder) }.semantics { contentDescription = "Folder ${folder.displayName}" }) {
-    MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees)
+    MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder")
     Row(Modifier.fillMaxWidth().padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Folder, null, Modifier.size(20.dp)); Spacer(Modifier.width(7.dp)); Column(Modifier.weight(1f)) { Text(folder.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text("${folder.totalCount} item", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
 }
 
@@ -690,7 +820,7 @@ private fun FolderCard(
         .semantics { contentDescription = item.displayName }
         .clickable(onClick = onClick)
 ) {
-    MediaThumbnailImage(item.uri, item.displayName, Modifier.fillMaxSize(), rotationDegrees)
+    MediaThumbnailImage(item.uri, item.displayName, Modifier.fillMaxSize(), rotationDegrees, "1:${item.id}:${item.sizeBytes}:${item.dateModifiedSeconds}")
     if (item.isVideo) {
         Surface(Modifier.align(Alignment.TopStart), color = MaterialTheme.colorScheme.scrim.copy(alpha = .7f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -723,16 +853,37 @@ private fun MediaThumbnailImage(
     contentDescription: String?,
     modifier: Modifier,
     rotationDegrees: Int = 0,
+    cacheVersion: String = "1",
 ) {
-    val context = LocalContext.current
-    val loader = remember(context) {
-        ImageLoader.Builder(context).components { add(VideoFrameDecoder.Factory()) }.build()
+    val context = LocalContext.current.applicationContext
+    val imageLoader = remember(context) { context.imageLoader }
+    val thumbnailCache = remember(context) { com.example.quickpic.ThumbnailCache(context) }
+    val cachedFile = remember(uri, cacheVersion) { thumbnailCache.existing(uri, cacheVersion) }
+    val saveScope = rememberCoroutineScope()
+    val request = remember(uri, cacheVersion) {
+        ImageRequest.Builder(context)
+            .data(uri)
+            // Grid cells are small; decoding to a bounded thumbnail avoids
+            // allocating full-resolution camera images/video frames.
+            .size(320, 320)
+            .memoryCacheKey("quickpic-thumb:$uri:$cacheVersion")
+            .diskCacheKey("quickpic-source:$uri:$cacheVersion")
+            .build()
     }
+
     AsyncImage(
-        model = uri,
+        model = cachedFile ?: request,
         contentDescription = contentDescription,
-        imageLoader = loader,
+        imageLoader = imageLoader,
         contentScale = ContentScale.Crop,
+        onSuccess = { state ->
+            if (cachedFile == null) {
+                val bitmap = state.result.drawable.toBitmap(320, 320)
+                saveScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    thumbnailCache.save(uri, cacheVersion, bitmap)
+                }
+            }
+        },
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -747,6 +898,7 @@ private fun MediaThumbnailImage(
     onRotateRequest: () -> Unit,
     onDetailsRequest: () -> Unit,
     onRenameRequest: () -> Unit,
+    onMoveRequest: () -> Unit,
     rotationDegrees: (Uri) -> Int,
 ) {
     val context = LocalContext.current
@@ -818,7 +970,7 @@ private fun MediaThumbnailImage(
                                 )
                                 DropdownMenuItem(text = { Text("Ubah") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Gunakan sebagai") }, onClick = { viewerOverflowOpen = false })
-                                DropdownMenuItem(text = { Text("Pindah ke") }, onClick = { viewerOverflowOpen = false })
+                                DropdownMenuItem(text = { Text("Pindah ke") }, onClick = { viewerOverflowOpen = false; onMoveRequest() })
                                 DropdownMenuItem(text = { Text("Salin ke") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Ganti nama") }, onClick = { viewerOverflowOpen = false; onRenameRequest() })
                                 DropdownMenuItem(text = { Text("Lihat di peta") }, onClick = { viewerOverflowOpen = false })
@@ -1039,12 +1191,12 @@ private fun Context.shareMedia(uris: List<Uri>) {
 
 private data class CopyResult(val copied: Int, val failed: Int, val errors: List<String> = emptyList())
 
-private fun CopyResult.failureMessage(): String = buildString {
+private fun CopyResult.failureMessage(action: String = "disalin"): String = buildString {
     append(
         if (copied > 0) {
-            "$copied file berhasil disalin, $failed gagal."
+            "$copied file berhasil $action, $failed gagal."
         } else {
-            "$failed file gagal disalin."
+            "$failed file gagal $action."
         },
     )
     if (errors.isNotEmpty()) {
@@ -1091,7 +1243,7 @@ private fun Context.copyMediaItems(
                 ?: throw IllegalStateException("MediaStore tidak dapat membuat file tujuan")
 
             stage = "read"
-            contentResolver.openInputStream(item.uri)?.use { input ->
+            val bytesWritten = contentResolver.openInputStream(item.uri)?.use { input ->
                 stage = "write"
                 contentResolver.openOutputStream(targetUri)?.use { output ->
                     input.copyTo(output, bufferSize = 1024 * 1024)
@@ -1108,6 +1260,14 @@ private fun Context.copyMediaItems(
                 )
                 if (updated != 1) throw IllegalStateException("Tidak dapat mempublikasikan file tujuan")
             }
+
+            stage = "verify"
+            verifyMediaStoreTarget(
+                targetUri = targetUri,
+                expectedDestinationPath = destinationPath,
+                expectedDisplayName = item.displayName,
+                expectedBytes = bytesWritten,
+            )
             copied++
         } catch (error: Throwable) {
             failed++
@@ -1126,13 +1286,25 @@ private fun Context.copyMediaItems(
 private fun Context.copyMediaItemsToTree(
     items: List<com.example.quickpic.data.MediaItem>,
     treeUri: Uri,
+    expectedDestinationPath: String? = null,
 ): CopyResult {
     var copied = 0
     var failed = 0
     val errors = mutableListOf<String>()
+    val treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+    val expectedTreeDocumentId = expectedDestinationPath?.let(::externalStorageDocumentId)
+    if (expectedTreeDocumentId != null && !treeDocumentId.equals(expectedTreeDocumentId, ignoreCase = true)) {
+        return CopyResult(
+            copied = 0,
+            failed = items.distinctBy { it.id }.size,
+            errors = items.distinctBy { it.id }.map { item ->
+                "${item.displayName}: folder: folder yang dipilih ($treeDocumentId) bukan $expectedTreeDocumentId"
+            },
+        )
+    }
     val treeDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
         treeUri,
-        DocumentsContract.getTreeDocumentId(treeUri),
+        treeDocumentId,
     )
 
     items.distinctBy { it.id }.forEach { item ->
@@ -1148,12 +1320,22 @@ private fun Context.copyMediaItemsToTree(
             ) ?: throw IllegalStateException("Pemilih folder tidak dapat membuat file tujuan")
 
             stage = "read"
-            contentResolver.openInputStream(item.uri)?.use { input ->
+            val bytesWritten = contentResolver.openInputStream(item.uri)?.use { input ->
                 stage = "write"
                 contentResolver.openOutputStream(targetUri, "w")?.use { output ->
                     input.copyTo(output, bufferSize = 1024 * 1024)
                 } ?: throw IllegalStateException("Tidak dapat membuka file tujuan")
             } ?: throw IllegalStateException("Tidak dapat membaca file sumber")
+
+            stage = "verify"
+            verifyTreeTarget(
+                targetUri = targetUri,
+                expectedTreeDocumentId = treeDocumentId,
+                expectedDestinationPath = expectedDestinationPath,
+                expectedDisplayName = item.displayName,
+                expectedBytes = bytesWritten,
+            )
+            scanTreeDocument(targetUri, mimeType)
             copied++
         } catch (error: Throwable) {
             failed++
@@ -1164,8 +1346,120 @@ private fun Context.copyMediaItemsToTree(
     return CopyResult(copied, failed, errors)
 }
 
+/**
+ * A source must never be deleted just because a write call returned normally.
+ * Some document providers buffer writes, so reopen the target and compare its
+ * contents before the move flow is allowed to remove the source.
+ */
+private fun Context.verifyMediaStoreTarget(
+    targetUri: Uri,
+    expectedDestinationPath: String,
+    expectedDisplayName: String,
+    expectedBytes: Long,
+) {
+    val expectedPath = normalizeRelativePath(expectedDestinationPath)
+    val metadata = contentResolver.query(
+        targetUri,
+        arrayOf(
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.SIZE,
+        ),
+        null,
+        null,
+        null,
+    )?.use { cursor ->
+        if (!cursor.moveToFirst()) throw IllegalStateException("File tujuan tidak ditemukan setelah dibuat")
+        Triple(
+            cursor.getString(0).orEmpty(),
+            cursor.getString(1).orEmpty(),
+            if (cursor.isNull(2)) null else cursor.getLong(2),
+        )
+    } ?: throw IllegalStateException("File tujuan tidak dapat diperiksa")
+
+    if (!metadata.first.equals(expectedPath, ignoreCase = true)) {
+        throw IllegalStateException("Lokasi tujuan berubah: ${metadata.first.ifBlank { "(kosong)" }}")
+    }
+    if (metadata.second != expectedDisplayName) {
+        throw IllegalStateException("Nama tujuan berubah: ${metadata.second.ifBlank { "(kosong)" }}")
+    }
+    verifyTargetBytes(targetUri, expectedBytes, metadata.third)
+}
+
+private fun Context.verifyTreeTarget(
+    targetUri: Uri,
+    expectedTreeDocumentId: String,
+    expectedDestinationPath: String?,
+    expectedDisplayName: String,
+    expectedBytes: Long,
+) {
+    val documentId = DocumentsContract.getDocumentId(targetUri)
+    val parentDocumentId = documentId.substringBeforeLast('/', missingDelimiterValue = "")
+    if (!parentDocumentId.equals(expectedTreeDocumentId, ignoreCase = true)) {
+        throw IllegalStateException("Lokasi tujuan berbeda dari folder yang dipilih: $documentId")
+    }
+    expectedDestinationPath?.let { destinationPath ->
+        val expectedDocumentId = externalStorageDocumentId(destinationPath)
+        if (!parentDocumentId.equals(expectedDocumentId, ignoreCase = true)) {
+            throw IllegalStateException("Lokasi tujuan bukan $expectedDocumentId")
+        }
+    }
+
+    val displayName = contentResolver.query(
+        targetUri,
+        arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+        null,
+        null,
+        null,
+    )?.use { cursor ->
+        if (!cursor.moveToFirst()) throw IllegalStateException("File tujuan tidak ditemukan setelah dibuat")
+        cursor.getString(0).orEmpty()
+    } ?: throw IllegalStateException("File tujuan tidak dapat diperiksa")
+    if (displayName != expectedDisplayName) {
+        throw IllegalStateException("Nama tujuan berubah: ${displayName.ifBlank { "(kosong)" }}")
+    }
+    verifyTargetBytes(targetUri, expectedBytes)
+}
+
+private fun Context.verifyTargetBytes(targetUri: Uri, expectedBytes: Long, reportedSize: Long? = null) {
+    if (reportedSize != null && reportedSize != expectedBytes) {
+        throw IllegalStateException("Ukuran metadata tujuan $reportedSize byte, seharusnya $expectedBytes byte")
+    }
+    val verifiedBytes = contentResolver.openInputStream(targetUri)?.use(InputStream::countBytes)
+        ?: throw IllegalStateException("File tujuan tidak dapat dibuka ulang")
+    if (verifiedBytes != expectedBytes) {
+        throw IllegalStateException("Ukuran tujuan $verifiedBytes byte, seharusnya $expectedBytes byte")
+    }
+}
+
+private fun InputStream.countBytes(): Long {
+    val buffer = ByteArray(1024 * 1024)
+    var total = 0L
+    while (true) {
+        val read = read(buffer)
+        if (read < 0) return total
+        total += read
+    }
+}
+
+private fun normalizeRelativePath(path: String): String = "${path.trim().trim('/').trimEnd('/')}/"
+
+private fun externalStorageDocumentId(path: String): String = "primary:${normalizeRelativePath(path).trimEnd('/')}"
+
+private fun Context.scanTreeDocument(documentUri: Uri, mimeType: String) {
+    runCatching {
+        val documentId = DocumentsContract.getDocumentId(documentUri)
+        val relativePath = documentId.substringAfter(':', documentId).trimStart('/')
+        if (relativePath.isNotBlank()) {
+            val path = File(Environment.getExternalStorageDirectory(), relativePath).absolutePath
+            MediaScannerConnection.scanFile(this, arrayOf(path), arrayOf(mimeType), null)
+        }
+    }
+}
+
 @Composable
 private fun CopyDestinationDialog(
+    title: String,
     folders: List<com.example.quickpic.data.MediaFolder>,
     enabled: Boolean,
     onDismiss: () -> Unit,
@@ -1173,7 +1467,7 @@ private fun CopyDestinationDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Salin ke") },
+        title = { Text(title) },
         text = {
             if (folders.isEmpty()) {
                 Text("Belum ada folder media yang dapat dipilih.")
@@ -1198,10 +1492,10 @@ private fun CopyDestinationDialog(
 }
 
 @Composable
-private fun CopyFailureDialog(message: String, onDismiss: () -> Unit) {
+private fun CopyFailureDialog(title: String = "Salin gagal", message: String, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Salin gagal") },
+        title = { Text(title) },
         text = { Text(message) },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } },
     )

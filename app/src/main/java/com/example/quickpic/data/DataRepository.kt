@@ -18,6 +18,7 @@ data class MediaItem(
     val displayName: String,
     val mimeType: String,
     val dateAddedSeconds: Long,
+    val dateModifiedSeconds: Long = 0L,
     val durationMillis: Long,
     val sizeBytes: Long,
     val relativePath: String,
@@ -56,6 +57,7 @@ private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
         MediaStore.Files.FileColumns.MIME_TYPE,
         MediaStore.Files.FileColumns.MEDIA_TYPE,
         MediaStore.Files.FileColumns.DATE_ADDED,
+        MediaStore.Files.FileColumns.DATE_MODIFIED,
         MediaStore.Files.FileColumns.DURATION,
         MediaStore.Files.FileColumns.SIZE,
         MediaStore.Files.FileColumns.RELATIVE_PATH,
@@ -74,6 +76,7 @@ private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
         val mimeTypeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
         val mediaTypeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
         val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_ADDED)
+        val dateModifiedColumn = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
         val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DURATION)
         val sizeColumn = cursor.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
         val relativePathColumn = cursor.getColumnIndex(MediaStore.Files.FileColumns.RELATIVE_PATH)
@@ -104,15 +107,16 @@ private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
                         // read-only Files aggregation URI on scoped storage.
                         uri = ContentUris.withAppendedId(
                             if (mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO) {
-                                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                             } else {
-                                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                             },
                             id,
                         ),
                         displayName = cursor.getString(nameColumn) ?: "Untitled media",
                         mimeType = mimeType,
                         dateAddedSeconds = cursor.getLong(dateAddedColumn),
+                        dateModifiedSeconds = if (dateModifiedColumn >= 0 && !cursor.isNull(dateModifiedColumn)) cursor.getLong(dateModifiedColumn) else 0L,
                         durationMillis = if (cursor.isNull(durationColumn)) 0L else cursor.getLong(durationColumn),
                         sizeBytes = if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) cursor.getLong(sizeColumn) else 0L,
                         relativePath = relativePath.ifBlank { "Pictures/" },
