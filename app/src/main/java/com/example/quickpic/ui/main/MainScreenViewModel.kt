@@ -124,10 +124,14 @@ private fun pinStandardFolders(folders: List<MediaFolder>): List<MediaFolder> {
         screenshots?.let { add(it.path) }
     }
     val others = folders.filterNot { it.path in pinnedPaths }
+    // Prioritaskan folder yang memiliki file di bagian atas,
+    // sedangkan folder kosong (totalCount == 0) selalu diletakkan di bagian paling bawah.
+    val (nonEmpty, empty) = others.partition { it.totalCount > 0 }
     return buildList {
         primaryDcim?.let(::add)
         screenshots?.let(::add)
-        addAll(others)
+        addAll(nonEmpty)
+        addAll(empty)
     }
 }
 

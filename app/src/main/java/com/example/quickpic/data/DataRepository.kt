@@ -4,9 +4,11 @@ import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import java.io.File
 
 interface DataRepository {
     val data: Flow<MediaLibrary>
@@ -41,15 +43,15 @@ data class MediaLibrary(
     val media: List<MediaItem>,
 )
 
-class DefaultDataRepository(context: Context) : DataRepository {
+class DefaultDataRepository(private val context: Context) : DataRepository {
     private val contentResolver = context.applicationContext.contentResolver
 
     override val data: Flow<MediaLibrary> = flow {
-        emit(contentResolver.loadMediaLibrary())
+        emit(contentResolver.loadMediaLibrary(context.applicationContext))
     }
 }
 
-private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
+private fun ContentResolver.loadMediaLibrary(context: Context? = null): MediaLibrary {
     val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
     val projection = arrayOf(
         MediaStore.Files.FileColumns._ID,
@@ -126,7 +128,7 @@ private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
         }
     } ?: emptyList()
 
-    val folders = media
+    val nonEmptyFolders = media
         .groupBy { it.relativePath }
         .map { (path, items) ->
             val folderName = path
@@ -142,7 +144,72 @@ private fun ContentResolver.loadMediaLibrary(): MediaLibrary {
                 videoCount = items.count { it.isVideo },
             )
         }
-        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.displayName })
 
-    return MediaLibrary(folders = folders, media = media)
+    val emptyFolders = scanEmptyFolders(context, nonEmptyFolders.map { it.path }.toSet())
+    val allFolders = (nonEmptyFolders + emptyFolders).sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.displayName })
+
+    return MediaLibrary(folders = allFolders, media = media)
+}
+
+private fun scanEmptyFolders(context: Context?, existingPaths: Set<String>): List<MediaFolder> {
+    val emptyFolders = mutableListOf<MediaFolder>()
+    val visitedPaths = existingPaths.map { it.trimEnd('/').lowercase() }.toMutableSet()
+
+    fun checkAndAdd(dir: File, relativePath: String) {
+        val normalized = relativePath.trimEnd('/').lowercase()
+        if (dir.exists() && dir.isDirectory && !dir.name.startsWith(".") && !visitedPaths.contains(normalized)) {
+            visitedPaths.add(normalized)
+            emptyFolders.add(
+                MediaFolder(
+                    path = if (relativePath.endsWith("/")) relativePath else "$relativePath/",
+                    displayName = dir.name,
+                    thumbnail = Uri.EMPTY,
+                    photoCount = 0,
+                    videoCount = 0,
+                )
+            )
+        }
+    }
+
+    // 1. Scan created folders from SharedPreferences (if any)
+    context?.let { ctx ->
+        val prefs = ctx.getSharedPreferences("app_folders", Context.MODE_PRIVATE)
+        val created = prefs.getStringSet("created_folders", emptySet()).orEmpty()
+        for (relPath in created) {
+            val file = File(Environment.getExternalStorageDirectory(), relPath.trimEnd('/'))
+            checkAndAdd(file, relPath)
+        }
+    }
+
+    // 2. Scan standard media roots for empty folders
+    val rootDirs = listOf(
+        Pair(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "Pictures"),
+        Pair(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "DCIM"),
+        Pair(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "Movies"),
+    )
+
+    for ((baseDir, baseName) in rootDirs) {
+        if (baseDir != null && baseDir.exists() && baseDir.isDirectory) {
+            baseDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.forEach { subDir ->
+                checkAndAdd(subDir, "$baseName/${subDir.name}/")
+            }
+        }
+    }
+
+    // 3. Scan top-level directories in storage
+    val externalRoot = Environment.getExternalStorageDirectory()
+    if (externalRoot != null && externalRoot.exists()) {
+        externalRoot.listFiles()?.filter {
+            it.isDirectory &&
+                !it.name.startsWith(".") &&
+                !it.name.equals("Android", ignoreCase = true) &&
+                !it.name.equals("Pictures", ignoreCase = true) &&
+                !it.name.equals("DCIM", ignoreCase = true) &&
+                !it.name.equals("Movies", ignoreCase = true)
+        }?.forEach { topDir ->
+            checkAndAdd(topDir, "${topDir.name}/")
+        }
+    }
+
+    return emptyFolders.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.displayName })
 }

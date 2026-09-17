@@ -25,6 +25,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -115,6 +119,8 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var renameFolder by remember { mutableStateOf<com.example.quickpic.data.MediaFolder?>(null) }
     var renameItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var renameError by remember { mutableStateOf<String?>(null) }
+    var createFolderOpen by remember { mutableStateOf(false) }
+    var newFolderName by remember { mutableStateOf("") }
     var deleteItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
     var pendingDeleteUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var pendingMoveSourceUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -299,7 +305,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                 HorizontalDivider()
                 DrawerItem("Folder", Icons.Default.Folder, selectedFolder == null && selectedTab == HomeTab.Folders.ordinal) { selectedTab = HomeTab.Folders.ordinal; openFolderPath = null; drawerOpen = false }
                 DrawerItem("Momen", Icons.Default.CalendarMonth, false) { selectedTab = HomeTab.Photos.ordinal; openFolderPath = null; drawerOpen = false }
-                DrawerItem("Tambah", Icons.Default.Add, false) { drawerOpen = false }
+                DrawerItem("Tambah", Icons.Default.Add, false) { drawerOpen = false; createFolderOpen = true }
                 DrawerItem("Pengaturan", Icons.Default.Settings, false) { drawerOpen = false; settingsOpen = true }
                 DrawerItem("Tentang", Icons.Default.Info, false) { drawerOpen = false; aboutOpen = true }
             }
@@ -410,7 +416,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                             DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
                                 OverflowItem("Tampilan", Icons.Default.GridView) { overflowOpen = false }
                                 OverflowItem("Urutkan", Icons.Default.Sort) { overflowOpen = false; sortOpen = true }
-                                OverflowItem("Tambah", Icons.Default.Add) { overflowOpen = false }
+                                OverflowItem("Tambah folder", Icons.Default.CreateNewFolder) { overflowOpen = false; createFolderOpen = true }
                                 if (selectedFolder == null) OverflowItem("Muat tersembunyi", Icons.Default.VisibilityOff) { overflowOpen = false }
                                 if (selectedFolder != null) {
                                     OverflowItem("Sembunyikan", Icons.Default.VisibilityOff) { overflowOpen = false }
@@ -505,20 +511,20 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     copyItems = emptyList()
                 }
             },
+            onNewFolderClick = { createFolderOpen = true },
             onFolderSelected = { destination ->
                 if (!copyBusy) {
                     val itemsToCopy = copyItems
                     copyBusy = true
-                    // Some MediaStore providers (including the OnePlus device
-                    // used for testing) allow videos only under DCIM/ or Movies/.
-                    // Pictures/Screenshots is a valid existing media location,
-                    // but creating a new video there requires the user's SAF
-                    // folder grant instead of a MediaStore.Video insert.
-                    if (itemsToCopy.any { it.isVideo } && destination.path.startsWith("Pictures/", ignoreCase = true)) {
+                    val canDirectAccess = Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
+                        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager())
+                    val needsSaf = !canDirectAccess && itemsToCopy.any { !isMediaStoreInsertAllowed(destination.path, it.isVideo) }
+
+                    if (needsSaf) {
                         pendingTreeCopyItems = itemsToCopy
                         android.widget.Toast.makeText(
                             context,
-                            "Pilih folder Pictures/Screenshots pada pemilih folder Android.",
+                            "Pilih folder ${destination.displayName} pada pemilih folder Android.",
                             android.widget.Toast.LENGTH_LONG,
                         ).show()
                         treeCopyLauncher.launch(null)
@@ -545,16 +551,21 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     moveItems = emptyList()
                 }
             },
+            onNewFolderClick = { createFolderOpen = true },
             onFolderSelected = { destination ->
                 if (!moveBusy) {
                     val itemsToMove = moveItems
                     moveBusy = true
-                    if (itemsToMove.any { it.isVideo } && destination.path.startsWith("Pictures/", ignoreCase = true)) {
+                    val canDirectAccess = Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
+                        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager())
+                    val needsSaf = !canDirectAccess && itemsToMove.any { !isMediaStoreInsertAllowed(destination.path, it.isVideo) }
+
+                    if (needsSaf) {
                         pendingTreeMoveItems = itemsToMove
                         pendingTreeMoveDestinationPath = destination.path
                         android.widget.Toast.makeText(
                             context,
-                            "Pilih folder Pictures/Screenshots pada pemilih folder Android.",
+                            "Pilih folder ${destination.displayName} pada pemilih folder Android.",
                             android.widget.Toast.LENGTH_LONG,
                         ).show()
                         treeMoveLauncher.launch(null)
@@ -575,6 +586,62 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     }
     moveFailureMessage?.let { message ->
         CopyFailureDialog(title = "Pindah gagal", message = message) { moveFailureMessage = null }
+    }
+
+    if (createFolderOpen) {
+        AlertDialog(
+            onDismissRequest = {
+                createFolderOpen = false
+                newFolderName = ""
+            },
+            title = { Text("Buat folder baru") },
+            text = {
+                Column {
+                    Text(
+                        "Folder baru akan dibuat di Pictures.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = newFolderName,
+                        onValueChange = { newFolderName = it },
+                        label = { Text("Nama folder") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    createFolderOpen = false
+                    newFolderName = ""
+                }) { Text("Batal") }
+            },
+            confirmButton = {
+                Button(
+                    enabled = newFolderName.trim().isNotBlank(),
+                    onClick = {
+                        val name = newFolderName.trim()
+                        createFolderOpen = false
+                        newFolderName = ""
+                        val folderDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), name)
+                        if (!folderDir.exists()) {
+                            folderDir.mkdirs()
+                        }
+                        val relativePath = "Pictures/$name/"
+                        val prefs = context.getSharedPreferences("app_folders", Context.MODE_PRIVATE)
+                        val set = prefs.getStringSet("created_folders", emptySet())?.toMutableSet() ?: mutableSetOf()
+                        set.add(relativePath)
+                        prefs.edit().putStringSet("created_folders", set).apply()
+                        viewModel.refresh()
+                        android.widget.Toast.makeText(context, "Folder '$name' berhasil dibuat.", android.widget.Toast.LENGTH_SHORT).show()
+                    },
+                ) {
+                    Text("Buat")
+                }
+            },
+        )
     }
 
     if (deleteItems.isNotEmpty()) {
@@ -782,9 +849,43 @@ private fun FolderCard(
     folder: com.example.quickpic.data.MediaFolder,
     rotationDegrees: Int = 0,
     onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
-) = Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onFolderClick(folder) }.semantics { contentDescription = "Folder ${folder.displayName}" }) {
-    MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder")
-    Row(Modifier.fillMaxWidth().padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Folder, null, Modifier.size(20.dp)); Spacer(Modifier.width(7.dp)); Column(Modifier.weight(1f)) { Text(folder.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall); Text("${folder.totalCount} item", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+) = Column(
+    Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(12.dp))
+        .clickable { onFolderClick(folder) }
+        .semantics { contentDescription = "Folder ${folder.displayName}" }
+) {
+    if (folder.thumbnail != Uri.EMPTY) {
+        MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder")
+    } else {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+            )
+        }
+    }
+    Row(Modifier.fillMaxWidth().padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.Folder, null, Modifier.size(20.dp))
+        Spacer(Modifier.width(7.dp))
+        Column(Modifier.weight(1f)) {
+            Text(folder.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (folder.totalCount == 0) "Kosong" else "${folder.totalCount} item",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
 }
 
 @Composable internal fun MediaGrid(
@@ -1209,6 +1310,15 @@ private fun CopyResult.failureMessage(action: String = "disalin"): String = buil
     }
 }
 
+private fun isMediaStoreInsertAllowed(destinationPath: String, isVideo: Boolean): Boolean {
+    val primaryDir = destinationPath.trim().trimStart('/').substringBefore('/').lowercase()
+    return if (isVideo) {
+        primaryDir == "dcim" || primaryDir == "movies"
+    } else {
+        primaryDir == "dcim" || primaryDir == "pictures"
+    }
+}
+
 private fun Context.copyMediaItems(
     items: List<com.example.quickpic.data.MediaItem>,
     destinationPath: String,
@@ -1217,61 +1327,97 @@ private fun Context.copyMediaItems(
     var failed = 0
     val errors = mutableListOf<String>()
     items.distinctBy { it.id }.forEach { item ->
-        val mediaCollection = if (item.isVideo) {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }
+        val mimeType = item.mimeType.ifBlank { if (item.isVideo) "video/mp4" else "image/jpeg" }
         var targetUri: Uri? = null
+        var createdFile: File? = null
         var stage = "insert"
         try {
-            val mimeType = item.mimeType.ifBlank { if (item.isVideo) "video/mp4" else "image/jpeg" }
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, item.displayName)
-                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, destinationPath)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+            if (isMediaStoreInsertAllowed(destinationPath, item.isVideo)) {
+                val mediaCollection = if (item.isVideo) {
+                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 }
-            }
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, item.displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, destinationPath)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                }
 
-            // A video in Pictures/Screenshots is still a video.  Insert it in
-            // MediaStore.Video, which officially indexes video in Pictures/.
-            // Do not fall back to MediaStore.Files: it is an aggregation view,
-            // and its failure used to hide the actual error from Video/Images.
-            targetUri = contentResolver.insert(mediaCollection, values)
-                ?: throw IllegalStateException("MediaStore tidak dapat membuat file tujuan")
+                // A video in Pictures/Screenshots is still a video.  Insert it in
+                // MediaStore.Video, which officially indexes video in Pictures/.
+                // Do not fall back to MediaStore.Files: it is an aggregation view,
+                // and its failure used to hide the actual error from Video/Images.
+                targetUri = contentResolver.insert(mediaCollection, values)
+                    ?: throw IllegalStateException("MediaStore tidak dapat membuat file tujuan")
 
-            stage = "read"
-            val bytesWritten = contentResolver.openInputStream(item.uri)?.use { input ->
-                stage = "write"
-                contentResolver.openOutputStream(targetUri)?.use { output ->
-                    input.copyTo(output, bufferSize = 1024 * 1024)
-                } ?: throw IllegalStateException("Tidak dapat membuka file tujuan")
-            } ?: throw IllegalStateException("Tidak dapat membaca file sumber")
+                stage = "read"
+                val bytesWritten = contentResolver.openInputStream(item.uri)?.use { input ->
+                    stage = "write"
+                    contentResolver.openOutputStream(targetUri)?.use { output ->
+                        input.copyTo(output, bufferSize = 1024 * 1024)
+                    } ?: throw IllegalStateException("Tidak dapat membuka file tujuan")
+                } ?: throw IllegalStateException("Tidak dapat membaca file sumber")
 
-            stage = "publish"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val updated = contentResolver.update(
-                    targetUri,
-                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                    null,
+                stage = "publish"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val updated = contentResolver.update(
+                        targetUri,
+                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                        null,
+                        null,
+                    )
+                    if (updated != 1) throw IllegalStateException("Tidak dapat mempublikasikan file tujuan")
+                }
+
+                stage = "verify"
+                verifyMediaStoreTarget(
+                    targetUri = targetUri,
+                    expectedDestinationPath = destinationPath,
+                    expectedDisplayName = item.displayName,
+                    expectedBytes = bytesWritten,
+                )
+                copied++
+            } else {
+                // For non-standard MediaStore directories (such as WhatsApp, Download, etc.),
+                // copy directly via filesystem and index using MediaScanner.
+                stage = "prepare_dir"
+                val destDir = File(Environment.getExternalStorageDirectory(), normalizeRelativePath(destinationPath).trimEnd('/'))
+                if (!destDir.exists()) {
+                    destDir.mkdirs()
+                }
+                val targetFile = File(destDir, item.displayName)
+                createdFile = targetFile
+
+                stage = "read"
+                val bytesWritten = contentResolver.openInputStream(item.uri)?.use { input ->
+                    stage = "write"
+                    targetFile.outputStream().use { output ->
+                        input.copyTo(output, bufferSize = 1024 * 1024)
+                    }
+                } ?: throw IllegalStateException("Tidak dapat membaca file sumber")
+
+                stage = "verify"
+                if (targetFile.length() != bytesWritten) {
+                    throw IllegalStateException("Ukuran tujuan ${targetFile.length()} byte, seharusnya $bytesWritten byte")
+                }
+
+                stage = "publish"
+                MediaScannerConnection.scanFile(
+                    this,
+                    arrayOf(targetFile.absolutePath),
+                    arrayOf(mimeType),
                     null,
                 )
-                if (updated != 1) throw IllegalStateException("Tidak dapat mempublikasikan file tujuan")
+                copied++
             }
-
-            stage = "verify"
-            verifyMediaStoreTarget(
-                targetUri = targetUri,
-                expectedDestinationPath = destinationPath,
-                expectedDisplayName = item.displayName,
-                expectedBytes = bytesWritten,
-            )
-            copied++
         } catch (error: Throwable) {
             failed++
             targetUri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            createdFile?.let { runCatching { if (it.exists()) it.delete() } }
             errors += "${item.displayName}: $stage: ${error.javaClass.simpleName}: ${error.message ?: "tanpa pesan"}"
         }
     }
@@ -1463,32 +1609,197 @@ private fun CopyDestinationDialog(
     folders: List<com.example.quickpic.data.MediaFolder>,
     enabled: Boolean,
     onDismiss: () -> Unit,
+    onNewFolderClick: () -> Unit = {},
     onFolderSelected: (com.example.quickpic.data.MediaFolder) -> Unit,
 ) {
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            if (folders.isEmpty()) {
-                Text("Belum ada folder media yang dapat dipilih.")
-            } else {
-                Column(Modifier.heightIn(max = 420.dp)) {
-                    folders.forEach { folder ->
-                        ListItem(
-                            headlineContent = { Text(folder.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text(folder.path, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            leadingContent = { Icon(Icons.Default.Folder, null) },
-                            modifier = Modifier.clickable(enabled = enabled) { onFolderSelected(folder) },
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.78f),
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (title.contains("Pindah", ignoreCase = true)) {
+                            Icons.Default.DriveFileMove
+                        } else {
+                            Icons.Default.ContentCopy
+                        },
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
                         )
+                        Text(
+                            text = "Pilih folder album tujuan",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = onNewFolderClick, enabled = enabled) {
+                        Icon(Icons.Default.CreateNewFolder, contentDescription = "Buat folder baru", tint = MaterialTheme.colorScheme.primary)
+                    }
+                    IconButton(onClick = onDismiss, enabled = enabled) {
+                        Icon(Icons.Default.Close, contentDescription = "Tutup")
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                // Folder List
+                if (folders.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "Belum ada folder media yang dapat dipilih.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(vertical = 6.dp),
+                    ) {
+                        items(folders, key = { it.path }) { folder ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = enabled) { onFolderSelected(folder) }
+                                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                // Folder Album Thumbnail Cover
+                                Box(
+                                    modifier = Modifier
+                                        .size(54.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (folder.thumbnail != Uri.EMPTY) {
+                                        MediaThumbnailImage(
+                                            uri = folder.thumbnail,
+                                            contentDescription = null,
+                                            modifier = Modifier.fillMaxSize(),
+                                            rotationDegrees = 0,
+                                            cacheVersion = "1:folder",
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                                            modifier = Modifier.size(28.dp),
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.width(16.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = folder.displayName,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        text = folder.path,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    val countText = if (folder.totalCount == 0) {
+                                        "0 item (folder kosong)"
+                                    } else if (folder.photoCount > 0 && folder.videoCount > 0) {
+                                        "${folder.totalCount} item (${folder.photoCount} foto, ${folder.videoCount} video)"
+                                    } else if (folder.videoCount > 0) {
+                                        "${folder.totalCount} video"
+                                    } else {
+                                        "${folder.totalCount} foto"
+                                    }
+                                    Text(
+                                        text = countText,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (folder.totalCount == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 88.dp, end = 16.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f),
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                // Bottom actions
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "${folders.size} folder tersedia",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    if (!enabled) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp,
+                        )
+                    } else {
+                        TextButton(
+                            onClick = onDismiss,
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Text("Batal", style = MaterialTheme.typography.labelLarge)
+                        }
                     }
                 }
             }
-        },
-        confirmButton = {
-            if (enabled) TextButton(onClick = onDismiss) { Text("Batal") }
-            else CircularProgressIndicator(Modifier.size(24.dp))
-        },
-    )
+        }
+    }
 }
 
 @Composable
