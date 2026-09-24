@@ -24,6 +24,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -46,6 +47,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import com.example.quickpic.ThumbnailCache
+import com.example.quickpic.rotateMediaFilePermanently
+
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -111,10 +115,17 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var aboutOpen by remember { mutableStateOf(false) }
     var overflowOpen by remember { mutableStateOf(false) }
     var selectionOverflowOpen by remember { mutableStateOf(false) }
+    var rotateSelectionOpen by remember { mutableStateOf(false) }
+    var rotateBusy by remember { mutableStateOf(false) }
+    var rotateError by remember { mutableStateOf<String?>(null) }
+    // Item yang menunggu write permission di Android 11+ sebelum diproses ulang
+    var pendingRotateItems by remember { mutableStateOf<List<com.example.quickpic.data.MediaItem>>(emptyList()) }
+    var pendingRotateDegrees by remember { mutableIntStateOf(0) }
     var sortOpen by remember { mutableStateOf(false) }
     var dateSortOpen by remember { mutableStateOf(false) }
     var nameSortOpen by remember { mutableStateOf(false) }
     var rotationOpen by remember { mutableStateOf(false) }
+    var rotationTargetItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var detailsItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var renameFolder by remember { mutableStateOf<com.example.quickpic.data.MediaFolder?>(null) }
     var renameItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
@@ -138,6 +149,75 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedMediaIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
+    val thumbnailCacheForRotation = remember { ThumbnailCache(context.applicationContext) }
+
+    // Helper untuk menjalankan rotasi permanen ke file
+    val performPermanentRotation: (List<com.example.quickpic.data.MediaItem>, Int) -> Unit = { items, deg ->
+        if (items.isNotEmpty() && deg != 0) {
+            rotateBusy = true
+            scope.launch {
+                val errors = mutableListOf<String>()
+                var successCount = 0
+                for (item in items) {
+                    val res = context.rotateMediaFilePermanently(item.uri, deg, thumbnailCacheForRotation)
+                    if (res.success) {
+                        successCount++
+                        // Reset rotasi virtual in-app karena file aslinya sudah berputar secara fisik di storage
+                        photoRotations.remove(item.uri.toString())
+                    } else {
+                        errors.add("${item.displayName}: ${res.errorMessage}")
+                    }
+                }
+                rotateBusy = false
+                viewModel.refresh()
+                scope.launch {
+                    delay(500)
+                    viewModel.refresh()
+                }
+                if (errors.isEmpty()) {
+                    android.widget.Toast.makeText(context, "$successCount file berhasil diputar permanen.", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    rotateError = errors.joinToString("\n")
+                }
+            }
+        }
+    }
+
+    // Write-request launcher (Android 11+) untuk mendapat izin tulis ke MediaStore sebelum rotasi.
+    val writeRequestLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        val items = pendingRotateItems
+        val deg = pendingRotateDegrees
+        pendingRotateItems = emptyList()
+        pendingRotateDegrees = 0
+        if (result.resultCode == Activity.RESULT_OK && items.isNotEmpty()) {
+            performPermanentRotation(items, deg)
+        } else {
+            rotateBusy = false
+            if (items.isNotEmpty()) {
+                android.widget.Toast.makeText(context, "Izin tulis ditolak, file tidak diputar.", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val requestRotateItems: (List<com.example.quickpic.data.MediaItem>, Int) -> Unit = { items, deg ->
+        if (items.isNotEmpty() && deg != 0) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                runCatching {
+                    val uris = items.map { it.uri }
+                    val request = MediaStore.createWriteRequest(context.contentResolver, uris)
+                    pendingRotateItems = items
+                    pendingRotateDegrees = deg
+                    writeRequestLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+                }.onFailure {
+                    // Fallback jika createWriteRequest gagal (misal URI file non-MediaStore)
+                    performPermanentRotation(items, deg)
+                }
+            } else {
+                performPermanentRotation(items, deg)
+            }
+        }
+    }
+
     // Dideklarasikan lebih dulu agar callback launcher dapat memanggil launcher
     // yang sama saat Android 10 meminta persetujuan penghapusan berikutnya.
     var deleteLauncher: androidx.activity.result.ActivityResultLauncher<IntentSenderRequest>? = null
@@ -392,6 +472,15 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                                         onClick = {
                                             selectionOverflowOpen = false
                                             selectedItems.firstOrNull()?.let { renameItem = it }
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Ubah") },
+                                        leadingIcon = { Icon(Icons.Default.Tune, null) },
+                                        enabled = selectedItems.isNotEmpty(),
+                                        onClick = {
+                                            selectionOverflowOpen = false
+                                            rotateSelectionOpen = true
                                         },
                                     )
                                     DropdownMenuItem(
@@ -720,7 +809,10 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
         viewerItems,
         viewerIndex,
         onDismiss = { viewerItems = emptyList() },
-        onRotateRequest = { rotationOpen = true },
+        onRotateRequest = { targetItem ->
+            rotationTargetItem = targetItem
+            rotationOpen = true
+        },
         onDetailsRequest = { if (viewerItems.isNotEmpty()) detailsItem = viewerItems[viewerIndex] },
         onRenameRequest = { if (viewerItems.isNotEmpty()) renameItem = viewerItems[viewerIndex] },
         onMoveRequest = {
@@ -731,15 +823,51 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
         },
         rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
     )
+    // Dialog rotasi dari MediaViewer (rotasi PERMANEN ke file)
     if (rotationOpen) {
+        val target = rotationTargetItem ?: viewerItems.getOrNull(viewerIndex)
         RotationDialog { degrees ->
-            if (degrees != 0 && viewerItems.isNotEmpty()) {
-                val uri = viewerItems[viewerIndex].uri
-                val currentDegrees = photoRotations[uri.toString()] ?: 0
-                photoRotations[uri.toString()] = (currentDegrees + degrees).mod(360)
-            }
             rotationOpen = false
+            rotationTargetItem = null
+            if (degrees != 0 && target != null) {
+                requestRotateItems(listOf(target), degrees)
+            }
         }
+    }
+    // Dialog rotasi untuk selection mode (menu Ubah) — rotasi PERMANEN ke file
+    if (rotateSelectionOpen) {
+        val selectedItems = library.media.filter { it.id in selectedMediaIds }
+        RotationDialog { degrees ->
+            rotateSelectionOpen = false
+            if (degrees != 0 && selectedItems.isNotEmpty()) {
+                requestRotateItems(selectedItems, degrees)
+            }
+        }
+    }
+    // Progress dialog saat rotasi sedang berjalan
+    if (rotateBusy) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Memutar foto...") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(32.dp))
+                    Spacer(Modifier.width(16.dp))
+                    Text("Sedang memproses, harap tunggu.")
+                }
+            },
+            confirmButton = {},
+            properties = DialogProperties(dismissOnClickOutside = false, dismissOnBackPress = false),
+        )
+    }
+    // Error dialog jika ada file yang gagal diputar
+    if (rotateError != null) {
+        AlertDialog(
+            onDismissRequest = { rotateError = null },
+            title = { Text("Beberapa foto gagal diputar") },
+            text = { Text(rotateError ?: "") },
+            confirmButton = { TextButton(onClick = { rotateError = null }) { Text("Tutup") } },
+        )
     }
 }
 
@@ -836,13 +964,45 @@ private fun RotationOption(label: String, degrees: Int, onSelect: (Int) -> Unit)
 private fun HomeTab.label() = when (this) { HomeTab.Folders -> "Folder"; HomeTab.Photos -> "Foto"; HomeTab.Videos -> "Video" }
 
 @Composable
+
 private fun FolderGrid(
     folders: List<com.example.quickpic.data.MediaFolder>,
     rotationDegrees: (Uri) -> Int = { 0 },
     onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
 ) {
     if (folders.isEmpty()) { EmptyState("Tidak ada folder foto/video."); return }
-    LazyVerticalGrid(columns = GridCells.Adaptive(150.dp), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { items(folders, key = { it.path }) { folder -> FolderCard(folder, rotationDegrees(folder.thumbnail), onFolderClick) } }
+
+    val gridState = rememberLazyGridState()
+    val context = LocalContext.current
+    val cache = remember { ThumbnailCache(context) }
+
+    // Prefetch thumbnails for the next two rows ahead of the visible items
+    LaunchedEffect(gridState.firstVisibleItemIndex) {
+        val visibleItems = gridState.layoutInfo.visibleItemsInfo
+        val startPrefetch = gridState.firstVisibleItemIndex + visibleItems.size
+        val prefetchCount = visibleItems.size * 2
+        for (i in startPrefetch until (startPrefetch + prefetchCount)) {
+            if (i >= folders.size) break
+            val folder = folders[i]
+            if (folder.thumbnail != Uri.EMPTY) {
+                // Warm up memory cache; actual loading is performed by Coil when needed
+                cache.getBitmap(folder.thumbnail, "1")
+            }
+        }
+    }
+
+    LazyVerticalGrid(
+        state = gridState,
+        columns = GridCells.Adaptive(150.dp),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        items(folders, key = { it.path }) { folder ->
+            FolderCard(folder, rotationDegrees(folder.thumbnail), onFolderClick)
+        }
+    }
 }
 @Composable
 private fun FolderCard(
@@ -979,9 +1139,9 @@ private fun MediaThumbnailImage(
         contentScale = ContentScale.Crop,
         onSuccess = { state ->
             if (cachedFile == null) {
-                val bitmap = state.result.drawable.toBitmap(320, 320)
+                val bitmap = state.result.drawable.toBitmap()
                 saveScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    thumbnailCache.save(uri, cacheVersion, bitmap)
+                    thumbnailCache.putBitmap(uri, cacheVersion, bitmap)
                 }
             }
         },
@@ -996,7 +1156,7 @@ private fun MediaThumbnailImage(
     items: List<com.example.quickpic.data.MediaItem>,
     initialIndex: Int,
     onDismiss: () -> Unit,
-    onRotateRequest: () -> Unit,
+    onRotateRequest: (com.example.quickpic.data.MediaItem) -> Unit,
     onDetailsRequest: () -> Unit,
     onRenameRequest: () -> Unit,
     onMoveRequest: () -> Unit,
@@ -1067,7 +1227,10 @@ private fun MediaThumbnailImage(
                                 DropdownMenuItem(
                                     text = { Text("Putar") },
                                     trailingIcon = { Icon(Icons.Default.ChevronRight, "Submenu") },
-                                    onClick = { viewerOverflowOpen = false; onRotateRequest() },
+                                    onClick = {
+                                        viewerOverflowOpen = false
+                                        onRotateRequest(items[pagerState.currentPage])
+                                    },
                                 )
                                 DropdownMenuItem(text = { Text("Ubah") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Gunakan sebagai") }, onClick = { viewerOverflowOpen = false })

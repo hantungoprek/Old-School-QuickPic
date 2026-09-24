@@ -2,8 +2,9 @@ package com.example.quickpic
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
-import androidx.core.graphics.drawable.toBitmap
+import androidx.collection.LruCache
 import java.io.File
 import java.security.MessageDigest
 
@@ -13,15 +14,52 @@ import java.security.MessageDigest
  */
 class ThumbnailCache(context: Context) {
     private val directory = File(context.applicationContext.cacheDir, "quickpic_thumbnails").apply { mkdirs() }
-    private val maxBytes = 256L * 1024L * 1024L
+    private val maxBytes = 256L * 1024L * 1024L // 256 MB on disk
 
-    fun fileFor(uri: Uri, version: String): File =
-        File(directory, sha256("$uri|$version") + ".jpg")
+    // In‑memory LRU cache (bitmap) limited to ~15% of max heap (in MB)
+    private val memoryCache: LruCache<String, Bitmap> = LruCache<String, Bitmap>(
+        (Runtime.getRuntime().maxMemory() / 1024 / 1024 * 0.15).toInt()
+    )
 
+    private fun key(uri: Uri, version: String): String = "$uri|$version"
+
+    private fun fileFor(uri: Uri, version: String): File =
+        File(directory, sha256(key(uri, version)) + ".jpg")
+
+    /** Return the cached file on disk if it exists. */
     fun existing(uri: Uri, version: String): File? =
         fileFor(uri, version).takeIf { it.isFile && it.length() > 0L }
 
-    fun save(uri: Uri, version: String, bitmap: Bitmap) {
+    /** Retrieve bitmap from memory cache, falling back to disk cache. */
+    fun getBitmap(uri: Uri, version: String): Bitmap? {
+        val k = key(uri, version)
+        memoryCache.get(k)?.let { return it }
+        val file = existing(uri, version) ?: return null
+        return BitmapFactory.decodeFile(file.absolutePath)?.also { memoryCache.put(k, it) }
+    }
+
+    /** Store bitmap in both memory and disk caches. */
+    fun putBitmap(uri: Uri, version: String, bitmap: Bitmap) {
+        val k = key(uri, version)
+        memoryCache.put(k, bitmap)
+        save(uri, version, bitmap)
+    }
+
+    /**
+     * Hapus cache untuk URI tertentu dari memory dan disk.
+     * Dipanggil setelah rotasi permanen agar thumbnail diregenerasi.
+     */
+    fun invalidate(uri: Uri) {
+        // Hapus semua versi cache untuk URI ini dari memory cache
+        memoryCache.snapshot().keys
+            .filter { it.startsWith("$uri|") }
+            .forEach { memoryCache.remove(it) }
+        // Hapus file disk cache untuk versi default ("1")
+        runCatching { fileFor(uri, "1").delete() }
+        runCatching { fileFor(uri, "1:folder").delete() }
+    }
+
+    private fun save(uri: Uri, version: String, bitmap: Bitmap) {
         val target = fileFor(uri, version)
         runCatching {
             target.outputStream().use { out ->
