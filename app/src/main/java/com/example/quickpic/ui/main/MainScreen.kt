@@ -20,7 +20,10 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -1195,7 +1198,7 @@ private fun MediaThumbnailImage(
             onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()); activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
         }
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), userScrollEnabled = pagerState.currentPage == 0 || items[pagerState.currentPage].isVideo.not()) { page ->
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), userScrollEnabled = true) { page ->
                 val item = items[page]
                 if (item.isVideo) {
                     Box(Modifier.fillMaxSize()) {
@@ -1296,7 +1299,25 @@ private fun ZoomablePhoto(
             .diskCacheKey("full-photo:$uri:$rotationRevision")
             .build()
     }
-    Box(Modifier.fillMaxSize().pointerInput(uri, rotationRevision) { detectTransformGestures { _, pan, zoom, _ -> scale = min(5f, max(1f, scale * zoom)); offset += pan } }) {
+    Box(Modifier.fillMaxSize().pointerInput(uri, rotationRevision) {
+        awaitEachGesture {
+            do {
+                val event = awaitPointerEvent()
+                val zoomChange = event.calculateZoom()
+                val panChange = event.calculatePan()
+                val isMultiTouch = event.changes.size > 1
+                // Hanya tangani gesture ini sendiri (dan cegah pager ikut geser) saat:
+                // - ada dua jari (pinch-to-zoom), atau
+                // - foto sedang dalam kondisi zoom in (scale > 1) sehingga geser dipakai untuk pan.
+                // Selain itu (satu jari, tidak sedang zoom), event diteruskan ke HorizontalPager.
+                if (isMultiTouch || scale > 1f) {
+                    scale = min(5f, max(1f, scale * zoomChange))
+                    offset += panChange
+                    event.changes.forEach { change -> if (change.positionChanged()) change.consume() }
+                }
+            } while (event.changes.any { it.pressed })
+        }
+    }) {
         AsyncImage(
             model = photoRequest,
             contentDescription = null,
