@@ -148,6 +148,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var pendingTreeMoveDestinationPath by remember { mutableStateOf<String?>(null) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedMediaIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var rotationRevision by remember { mutableLongStateOf(0L) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
     val thumbnailCacheForRotation = remember { ThumbnailCache(context.applicationContext) }
 
@@ -167,6 +168,9 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     } else {
                         errors.add("${item.displayName}: ${res.errorMessage}")
                     }
+                }
+                if (successCount > 0) {
+                    rotationRevision = System.currentTimeMillis()
                 }
                 rotateBusy = false
                 viewModel.refresh()
@@ -527,6 +531,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     media = folderMedia,
                     modifier = Modifier.padding(innerPadding),
                     rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
+                    rotationRevision = rotationRevision,
                     selectionMode = selectionMode,
                     selectedMediaIds = selectedMediaIds,
                     onMediaClick = { index ->
@@ -551,9 +556,9 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                         }
                     }
                     when (HomeTab.entries[selectedTab]) {
-                        HomeTab.Folders -> FolderGrid(library.folders, rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }) { openFolderPath = it.path }
-                        HomeTab.Photos -> { val list = library.media.filterNot { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, onMediaClick = { viewerItems = list; viewerIndex = it }) }
-                        HomeTab.Videos -> { val list = library.media.filter { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, onMediaClick = { viewerItems = list; viewerIndex = it }) }
+                        HomeTab.Folders -> FolderGrid(library.folders, rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision) { openFolderPath = it.path }
+                        HomeTab.Photos -> { val list = library.media.filterNot { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision, onMediaClick = { viewerItems = list; viewerIndex = it }) }
+                        HomeTab.Videos -> { val list = library.media.filter { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision, onMediaClick = { viewerItems = list; viewerIndex = it }) }
                     }
                 }
             }
@@ -822,6 +827,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             }
         },
         rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
+        rotationRevision = rotationRevision,
     )
     // Dialog rotasi dari MediaViewer (rotasi PERMANEN ke file)
     if (rotationOpen) {
@@ -968,6 +974,7 @@ private fun HomeTab.label() = when (this) { HomeTab.Folders -> "Folder"; HomeTab
 private fun FolderGrid(
     folders: List<com.example.quickpic.data.MediaFolder>,
     rotationDegrees: (Uri) -> Int = { 0 },
+    rotationRevision: Long = 0L,
     onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
 ) {
     if (folders.isEmpty()) { EmptyState("Tidak ada folder foto/video."); return }
@@ -977,7 +984,7 @@ private fun FolderGrid(
     val cache = remember { ThumbnailCache(context) }
 
     // Prefetch thumbnails for the next two rows ahead of the visible items
-    LaunchedEffect(gridState.firstVisibleItemIndex) {
+    LaunchedEffect(gridState.firstVisibleItemIndex, rotationRevision) {
         val visibleItems = gridState.layoutInfo.visibleItemsInfo
         val startPrefetch = gridState.firstVisibleItemIndex + visibleItems.size
         val prefetchCount = visibleItems.size * 2
@@ -986,7 +993,7 @@ private fun FolderGrid(
             val folder = folders[i]
             if (folder.thumbnail != Uri.EMPTY) {
                 // Warm up memory cache; actual loading is performed by Coil when needed
-                cache.getBitmap(folder.thumbnail, "1")
+                cache.getBitmap(folder.thumbnail, "1:folder:${folder.path}:${folder.thumbnail}:$rotationRevision")
             }
         }
     }
@@ -1000,7 +1007,7 @@ private fun FolderGrid(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         items(folders, key = { it.path }) { folder ->
-            FolderCard(folder, rotationDegrees(folder.thumbnail), onFolderClick)
+            FolderCard(folder, rotationDegrees(folder.thumbnail), rotationRevision, onFolderClick)
         }
     }
 }
@@ -1008,6 +1015,7 @@ private fun FolderGrid(
 private fun FolderCard(
     folder: com.example.quickpic.data.MediaFolder,
     rotationDegrees: Int = 0,
+    rotationRevision: Long = 0L,
     onFolderClick: (com.example.quickpic.data.MediaFolder) -> Unit,
 ) = Column(
     Modifier
@@ -1017,7 +1025,7 @@ private fun FolderCard(
         .semantics { contentDescription = "Folder ${folder.displayName}" }
 ) {
     if (folder.thumbnail != Uri.EMPTY) {
-        MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder")
+        MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder:${folder.path}:${folder.thumbnail}:$rotationRevision", rotationRevision)
     } else {
         Box(
             modifier = Modifier
@@ -1052,6 +1060,7 @@ private fun FolderCard(
     media: List<com.example.quickpic.data.MediaItem>,
     modifier: Modifier = Modifier,
     rotationDegrees: (Uri) -> Int = { 0 },
+    rotationRevision: Long = 0L,
     selectionMode: Boolean = false,
     selectedMediaIds: Set<Long> = emptySet(),
     onMediaClick: (Int) -> Unit,
@@ -1062,6 +1071,7 @@ private fun FolderCard(
             MediaThumbnail(
                 item = item,
                 rotationDegrees = rotationDegrees(item.uri),
+                rotationRevision = rotationRevision,
                 selectionMode = selectionMode,
                 selected = item.id in selectedMediaIds,
             ) { onMediaClick(media.indexOf(item)) }
@@ -1071,6 +1081,7 @@ private fun FolderCard(
 @Composable private fun MediaThumbnail(
     item: com.example.quickpic.data.MediaItem,
     rotationDegrees: Int = 0,
+    rotationRevision: Long = 0L,
     selectionMode: Boolean = false,
     selected: Boolean = false,
     onClick: () -> Unit,
@@ -1081,7 +1092,7 @@ private fun FolderCard(
         .semantics { contentDescription = item.displayName }
         .clickable(onClick = onClick)
 ) {
-    MediaThumbnailImage(item.uri, item.displayName, Modifier.fillMaxSize(), rotationDegrees, "1:${item.id}:${item.sizeBytes}:${item.dateModifiedSeconds}")
+    MediaThumbnailImage(item.uri, item.displayName, Modifier.fillMaxSize(), rotationDegrees, "1:${item.id}:${item.sizeBytes}:${item.dateModifiedSeconds}:$rotationRevision", rotationRevision)
     if (item.isVideo) {
         Surface(Modifier.align(Alignment.TopStart), color = MaterialTheme.colorScheme.scrim.copy(alpha = .7f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1115,20 +1126,21 @@ private fun MediaThumbnailImage(
     modifier: Modifier,
     rotationDegrees: Int = 0,
     cacheVersion: String = "1",
+    rotationRevision: Long = 0L,
 ) {
     val context = LocalContext.current.applicationContext
     val imageLoader = remember(context) { context.imageLoader }
     val thumbnailCache = remember(context) { com.example.quickpic.ThumbnailCache(context) }
-    val cachedFile = remember(uri, cacheVersion) { thumbnailCache.existing(uri, cacheVersion) }
+    val cachedFile = remember(uri, cacheVersion, rotationRevision) { thumbnailCache.existing(uri, cacheVersion) }
     val saveScope = rememberCoroutineScope()
-    val request = remember(uri, cacheVersion) {
+    val request = remember(uri, cacheVersion, rotationRevision) {
         ImageRequest.Builder(context)
             .data(uri)
             // Grid cells are small; decoding to a bounded thumbnail avoids
             // allocating full-resolution camera images/video frames.
             .size(320, 320)
-            .memoryCacheKey("quickpic-thumb:$uri:$cacheVersion")
-            .diskCacheKey("quickpic-source:$uri:$cacheVersion")
+            .memoryCacheKey("quickpic-thumb:$uri:$cacheVersion:$rotationRevision")
+            .diskCacheKey("quickpic-source:$uri:$cacheVersion:$rotationRevision")
             .build()
     }
 
@@ -1161,6 +1173,7 @@ private fun MediaThumbnailImage(
     onRenameRequest: () -> Unit,
     onMoveRequest: () -> Unit,
     rotationDegrees: (Uri) -> Int,
+    rotationRevision: Long = 0L,
 ) {
     val context = LocalContext.current
     val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, items.lastIndex), pageCount = { items.size })
@@ -1207,6 +1220,7 @@ private fun MediaThumbnailImage(
                         zoomInSignal = photoZoomInSignal,
                         zoomOutSignal = photoZoomOutSignal,
                         rotationDegrees = rotationDegrees(item.uri),
+                        rotationRevision = rotationRevision,
                     ) { controlsVisible = !controlsVisible }
                 }
             }
@@ -1261,10 +1275,12 @@ private fun ZoomablePhoto(
     zoomInSignal: Int,
     zoomOutSignal: Int,
     rotationDegrees: Int,
+    rotationRevision: Long = 0L,
     onTap: () -> Unit,
 ) {
-    var scale by remember(uri) { mutableFloatStateOf(1f) }
-    var offset by remember(uri) { mutableStateOf(Offset.Zero) }
+    val context = LocalContext.current
+    var scale by remember(uri, rotationRevision) { mutableFloatStateOf(1f) }
+    var offset by remember(uri, rotationRevision) { mutableStateOf(Offset.Zero) }
     var lastZoomInSignal by remember(uri) { mutableIntStateOf(zoomInSignal) }
     var lastZoomOutSignal by remember(uri) { mutableIntStateOf(zoomOutSignal) }
     LaunchedEffect(zoomInSignal) {
@@ -1273,14 +1289,26 @@ private fun ZoomablePhoto(
     LaunchedEffect(zoomOutSignal) {
         if (zoomOutSignal > lastZoomOutSignal) { scale = max(1f, scale / 1.25f); if (scale <= 1f) offset = Offset.Zero; lastZoomOutSignal = zoomOutSignal }
     }
-    Box(Modifier.fillMaxSize().pointerInput(uri) { detectTransformGestures { _, pan, zoom, _ -> scale = min(5f, max(1f, scale * zoom)); offset += pan } }) {
-        AsyncImage(uri, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().graphicsLayer {
+    val photoRequest = remember(uri, rotationRevision) {
+        ImageRequest.Builder(context)
+            .data(uri)
+            .memoryCacheKey("full-photo:$uri:$rotationRevision")
+            .diskCacheKey("full-photo:$uri:$rotationRevision")
+            .build()
+    }
+    Box(Modifier.fillMaxSize().pointerInput(uri, rotationRevision) { detectTransformGestures { _, pan, zoom, _ -> scale = min(5f, max(1f, scale * zoom)); offset += pan } }) {
+        AsyncImage(
+            model = photoRequest,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize().graphicsLayer {
                 scaleX = scale
                 scaleY = scale
                 translationX = offset.x
                 translationY = offset.y
                 rotationZ = rotationDegrees.toFloat()
-            }.clickable { onTap() })
+            }.clickable { onTap() }
+        )
     }
 }
 
@@ -1299,7 +1327,7 @@ private fun MediaDetailsDialog(
                 DetailRow("Lokasi", item.relativePath.ifBlank { "Internal storage" })
                 DetailRow("Ukuran", formatFileSize(item.sizeBytes))
                 if (item.isVideo) DetailRow("Durasi", formatDuration(item.durationMillis))
-                DetailRow("Tanggal", formatDateTime(item.dateAddedSeconds))
+                DetailRow("Tanggal", formatDateTime(item.effectiveDateSeconds))
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } },

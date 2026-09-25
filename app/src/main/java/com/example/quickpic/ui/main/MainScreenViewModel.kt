@@ -79,7 +79,7 @@ private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): Media
         val newestByFolder: Map<String, Long> = media
             .asSequence()
             .groupingBy { it.relativePath }
-            .fold(0L) { newest, item -> maxOf(newest, item.dateAddedSeconds.coerceAtLeast(0L)) }
+            .fold(0L) { newest, item -> maxOf(newest, item.effectiveDateSeconds.coerceAtLeast(0L)) }
 
         val sortedFolders = folders.sortedWith(
             compareBy<MediaFolder> { newestByFolder[it.path] ?: 0L }
@@ -87,7 +87,7 @@ private fun MediaLibrary.sorted(mode: SortMode, direction: SortDirection): Media
                 .thenBy { it.path }
         )
         val sortedMedia = media.sortedWith(
-            compareBy<MediaItem> { it.dateAddedSeconds.coerceAtLeast(0L) }
+            compareBy<MediaItem> { it.effectiveDateSeconds.coerceAtLeast(0L) }
                 .thenBy { it.displayName.lowercase() }
                 .thenBy { it.id }
         )

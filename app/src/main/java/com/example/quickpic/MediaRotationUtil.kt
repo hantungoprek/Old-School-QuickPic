@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -27,14 +26,8 @@ data class RotateResult(
  * Rotasi permanen file gambar/video ke storage fisik sehingga saat dibuka di aplikasi
  * lain (Google Photos, WhatsApp, Gallery bawaan, PC, dll) hasil rotasi tetap permanen.
  *
- * Strategi:
- * 1. Gambar (JPEG, PNG, WebP): Rotasi fisik pixel data menggunakan Bitmap Matrix.
- * 2. Salin metadata EXIF berharga (Date, Camera info, GPS) ke file baru.
- * 3. Reset EXIF Orientation ke NORMAL (1) karena orientasi pixel sudah tegak lurus fisik.
- * 4. Tulis kembali ke storage melalui OutputStream MediaStore.
- * 5. Update database MediaStore (ORIENTATION = 0, SIZE, DATE_MODIFIED).
- * 6. Video: Update metadata ORIENTATION di MediaStore.
- * 7. Bersihkan semua layer cache (Memory, Coil, Disk Thumbnail).
+ * Menjaga tanggal asli file (DATE_ADDED, DATE_TAKEN, EXIF DateTime) agar urutan sorting
+ * foto di album tidak bergeser setelah file dirotasi.
  */
 suspend fun Context.rotateMediaFilePermanently(
     uri: Uri,
@@ -67,17 +60,43 @@ private fun Context.rotateImageFilePhysically(
 ): RotateResult {
     val tempFile = File(cacheDir, "rotate_temp_${System.currentTimeMillis()}.${if (mimeType.contains("png")) "png" else "jpg"}")
     try {
-        // 1. Baca byte gambar asli
+        // 1. Ambil metadata tanggal asli dari MediaStore agar urutan foto tidak meloncat
+        var origDateAdded = 0L
+        var origDateTaken = 0L
+        var origDateModified = 0L
+
+        try {
+            val projection = arrayOf(
+                MediaStore.MediaColumns.DATE_ADDED,
+                MediaStore.MediaColumns.DATE_MODIFIED,
+                "datetaken",
+            )
+            contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val addedIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+                    val modIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                    val takenIdx = cursor.getColumnIndex("datetaken")
+                    if (addedIdx >= 0) origDateAdded = cursor.getLong(addedIdx)
+                    if (modIdx >= 0) origDateModified = cursor.getLong(modIdx)
+                    if (takenIdx >= 0) origDateTaken = cursor.getLong(takenIdx)
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2. Baca byte gambar asli
         val rawBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: return RotateResult(uri, false, "Tidak dapat membaca file gambar.")
 
-        // 2. Baca orientasi EXIF awal jika ada
+        // 3. Baca orientasi EXIF awal dan preservasi semua tag metadata berharga
         var existingExifDegrees = 0
         val exifAttributes = mutableMapOf<String, String>()
         val exifTagsToPreserve = listOf(
             ExifInterface.TAG_DATETIME,
             ExifInterface.TAG_DATETIME_ORIGINAL,
             ExifInterface.TAG_DATETIME_DIGITIZED,
+            ExifInterface.TAG_OFFSET_TIME,
+            ExifInterface.TAG_OFFSET_TIME_ORIGINAL,
+            ExifInterface.TAG_OFFSET_TIME_DIGITIZED,
             ExifInterface.TAG_GPS_LATITUDE,
             ExifInterface.TAG_GPS_LATITUDE_REF,
             ExifInterface.TAG_GPS_LONGITUDE,
@@ -114,14 +133,12 @@ private fun Context.rotateImageFilePhysically(
             }
         } catch (_: Exception) {}
 
-        // 3. Decode Bitmap dengan resolusi penuh
-        // Cek dimensi gambar terlebih dahulu
+        // 4. Decode Bitmap dengan resolusi penuh
         val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, boundsOpts)
 
-        // Hitung sample size jika gambar luar biasa besar untuk mencegah OOM pada perangkat low-memory
         var sampleSize = 1
-        val maxDimension = 8192 // Dukung hingga resolusi 8K
+        val maxDimension = 8192
         while (boundsOpts.outWidth / sampleSize > maxDimension || boundsOpts.outHeight / sampleSize > maxDimension) {
             sampleSize *= 2
         }
@@ -133,8 +150,7 @@ private fun Context.rotateImageFilePhysically(
         val sourceBitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
             ?: return RotateResult(uri, false, "Gagal men-decode bitmap gambar.")
 
-        // 4. Hitung total rotasi yang diperlukan:
-        // Orientasi EXIF bawaan kamera + rotasi yang dipilih user
+        // 5. Hitung total rotasi fisik yang diperlukan
         val totalRotationDegrees = ((existingExifDegrees + requestedDegrees) % 360 + 360) % 360
 
         val matrix = Matrix().apply {
@@ -154,7 +170,7 @@ private fun Context.rotateImageFilePhysically(
             sourceBitmap.recycle()
         }
 
-        // 5. Tulis ke file temporer lokal
+        // 6. Tulis ke file temporer lokal
         val isPng = mimeType.contains("png", ignoreCase = true)
         val isWebp = mimeType.contains("webp", ignoreCase = true)
         val format = when {
@@ -170,7 +186,7 @@ private fun Context.rotateImageFilePhysically(
         }
         rotatedBitmap.recycle()
 
-        // 6. Tulis kembali metadata EXIF ke file temporer (khusus JPEG/WebP)
+        // 7. Tulis kembali metadata EXIF ke file temporer
         if (!isPng) {
             try {
                 val tempExif = ExifInterface(tempFile.absolutePath)
@@ -186,7 +202,7 @@ private fun Context.rotateImageFilePhysically(
             } catch (_: Exception) {}
         }
 
-        // 7. Salin isi tempFile kembali ke ContentResolver OutputStream (MediaStore URI)
+        // 8. Salin isi tempFile kembali ke MediaStore URI
         val newBytes = tempFile.readBytes()
         val outStream = contentResolver.openOutputStream(uri, "rwt")
             ?: contentResolver.openOutputStream(uri, "wt")
@@ -198,12 +214,19 @@ private fun Context.rotateImageFilePhysically(
             out.flush()
         }
 
-        // 8. Update database MediaStore
-        val nowSeconds = System.currentTimeMillis() / 1000
+        // 9. Update database MediaStore (Pertahankan tanggal asli agar urutan foto tidak rusak)
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.ORIENTATION, 0) // Reset orientasi MediaStore ke 0
+            put(MediaStore.Images.Media.ORIENTATION, 0)
             put(MediaStore.MediaColumns.SIZE, newBytes.size.toLong())
-            put(MediaStore.MediaColumns.DATE_MODIFIED, nowSeconds)
+            if (origDateAdded > 0L) {
+                put(MediaStore.MediaColumns.DATE_ADDED, origDateAdded)
+            }
+            if (origDateTaken > 0L) {
+                put("datetaken", origDateTaken)
+            }
+            if (origDateModified > 0L) {
+                put(MediaStore.MediaColumns.DATE_MODIFIED, origDateModified)
+            }
         }
         try {
             contentResolver.update(uri, values, null, null)
@@ -213,14 +236,7 @@ private fun Context.rotateImageFilePhysically(
             contentResolver.notifyChange(uri, null)
         } catch (_: Exception) {}
 
-        // Scan path file fisik jika memungkinkan
-        try {
-            getFilePathFromUri(uri)?.let { physicalPath ->
-                MediaScannerConnection.scanFile(applicationContext, arrayOf(physicalPath), null, null)
-            }
-        } catch (_: Exception) {}
-
-        // 9. Invalidate semua level cache (QuickPic Thumbnail Cache & Coil ImageLoader)
+        // 10. Invalidate semua layer cache (QuickPic Thumbnail Cache & Coil ImageLoader)
         thumbnailCache?.invalidate(uri)
         try {
             imageLoader.memoryCache?.clear()
@@ -247,16 +263,32 @@ private fun Context.rotateVideoMetadata(
     thumbnailCache: ThumbnailCache?,
 ): RotateResult {
     return runCatching {
-        val projection = arrayOf(MediaStore.Video.Media.ORIENTATION)
-        val current = contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getInt(0) else 0
-        } ?: 0
+        val projection = arrayOf(
+            MediaStore.Video.Media.ORIENTATION,
+            MediaStore.MediaColumns.DATE_ADDED,
+            "datetaken",
+        )
+        var currentRotation = 0
+        var origDateAdded = 0L
+        var origDateTaken = 0L
 
-        val newRotation = ((current + degrees) % 360 + 360) % 360
+        contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val rotIdx = cursor.getColumnIndex(MediaStore.Video.Media.ORIENTATION)
+                val addedIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+                val takenIdx = cursor.getColumnIndex("datetaken")
+                if (rotIdx >= 0) currentRotation = cursor.getInt(rotIdx)
+                if (addedIdx >= 0) origDateAdded = cursor.getLong(addedIdx)
+                if (takenIdx >= 0) origDateTaken = cursor.getLong(takenIdx)
+            }
+        }
+
+        val newRotation = ((currentRotation + degrees) % 360 + 360) % 360
 
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.ORIENTATION, newRotation)
-            put(MediaStore.MediaColumns.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+            if (origDateAdded > 0L) put(MediaStore.MediaColumns.DATE_ADDED, origDateAdded)
+            if (origDateTaken > 0L) put("datetaken", origDateTaken)
         }
         val updated = contentResolver.update(uri, values, null, null)
         try {
@@ -288,18 +320,4 @@ private fun exifOrientationToDegrees(orientation: Int): Int = when (orientation)
     ExifInterface.ORIENTATION_ROTATE_180 -> 180
     ExifInterface.ORIENTATION_ROTATE_270 -> 270
     else -> 0
-}
-
-private fun Context.getFilePathFromUri(uri: Uri): String? {
-    val projection = arrayOf(MediaStore.MediaColumns.DATA)
-    return try {
-        contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-                if (idx >= 0) cursor.getString(idx) else null
-            } else null
-        }
-    } catch (_: Exception) {
-        null
-    }
 }

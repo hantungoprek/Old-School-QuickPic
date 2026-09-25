@@ -8,7 +8,8 @@ import androidx.collection.LruCache
 import java.io.File
 import java.security.MessageDigest
 
-/** Persistent thumbnail cache stored under the app cache directory.
+/**
+ * Persistent thumbnail cache stored under the app cache directory.
  * Android removes this directory when the user chooses Settings > Apps >
  * QuickPic > Clear cache, while normal app restarts keep the thumbnails.
  */
@@ -18,13 +19,15 @@ class ThumbnailCache(context: Context) {
 
     // In‑memory LRU cache (bitmap) limited to ~15% of max heap (in MB)
     private val memoryCache: LruCache<String, Bitmap> = LruCache<String, Bitmap>(
-        (Runtime.getRuntime().maxMemory() / 1024 / 1024 * 0.15).toInt()
+        (Runtime.getRuntime().maxMemory() / 1024 / 1024 * 0.15).toInt().coerceAtLeast(16)
     )
 
     private fun key(uri: Uri, version: String): String = "$uri|$version"
 
+    private fun uriHash(uri: Uri): String = sha256(uri.toString())
+
     private fun fileFor(uri: Uri, version: String): File =
-        File(directory, sha256(key(uri, version)) + ".jpg")
+        File(directory, "${uriHash(uri)}_${sha256(version)}.jpg")
 
     /** Return the cached file on disk if it exists. */
     fun existing(uri: Uri, version: String): File? =
@@ -46,24 +49,36 @@ class ThumbnailCache(context: Context) {
     }
 
     /**
-     * Hapus cache untuk URI tertentu dari memory dan disk.
-     * Dipanggil setelah rotasi permanen agar thumbnail diregenerasi.
+     * Hapus seluruh cache untuk URI tertentu dari memory dan disk.
+     * Dipanggil setelah rotasi permanen agar thumbnail langsung diregenerasi dari file baru.
      */
     fun invalidate(uri: Uri) {
-        // Hapus semua versi cache untuk URI ini dari memory cache
+        val uriPrefix = "$uri|"
         memoryCache.snapshot().keys
-            .filter { it.startsWith("$uri|") }
+            .filter { it.startsWith(uriPrefix) }
             .forEach { memoryCache.remove(it) }
-        // Hapus file disk cache untuk versi default ("1")
-        runCatching { fileFor(uri, "1").delete() }
-        runCatching { fileFor(uri, "1:folder").delete() }
+
+        val prefix = uriHash(uri)
+        runCatching {
+            directory.listFiles()
+                ?.filter { it.name.startsWith(prefix) }
+                ?.forEach { it.delete() }
+        }
+    }
+
+    /** Hapus seluruh cache */
+    fun clearAll() {
+        memoryCache.evictAll()
+        runCatching {
+            directory.listFiles()?.forEach { it.delete() }
+        }
     }
 
     private fun save(uri: Uri, version: String, bitmap: Bitmap) {
         val target = fileFor(uri, version)
         runCatching {
             target.outputStream().use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
                 out.flush()
             }
             trimIfNeeded()

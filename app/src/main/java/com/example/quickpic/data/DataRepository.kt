@@ -21,11 +21,20 @@ data class MediaItem(
     val mimeType: String,
     val dateAddedSeconds: Long,
     val dateModifiedSeconds: Long = 0L,
+    val dateTakenMillis: Long = 0L,
     val durationMillis: Long,
     val sizeBytes: Long,
     val relativePath: String,
 ) {
     val isVideo: Boolean get() = mimeType.startsWith("video/")
+
+    /** Tanggal acuan terbaik untuk pengurutan tanggal (terbaru/terlama) */
+    val effectiveDateSeconds: Long
+        get() = when {
+            dateTakenMillis > 0L -> dateTakenMillis / 1000L
+            dateModifiedSeconds > 0L -> dateModifiedSeconds
+            else -> dateAddedSeconds
+        }
 }
 
 data class MediaFolder(
@@ -60,6 +69,7 @@ private fun ContentResolver.loadMediaLibrary(context: Context? = null): MediaLib
         MediaStore.Files.FileColumns.MEDIA_TYPE,
         MediaStore.Files.FileColumns.DATE_ADDED,
         MediaStore.Files.FileColumns.DATE_MODIFIED,
+        "datetaken", // MediaStore.Images.Media.DATE_TAKEN / MediaStore.Video.Media.DATE_TAKEN
         MediaStore.Files.FileColumns.DURATION,
         MediaStore.Files.FileColumns.SIZE,
         MediaStore.Files.FileColumns.RELATIVE_PATH,
@@ -79,6 +89,7 @@ private fun ContentResolver.loadMediaLibrary(context: Context? = null): MediaLib
         val mediaTypeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
         val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_ADDED)
         val dateModifiedColumn = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
+        val dateTakenColumn = cursor.getColumnIndex("datetaken")
         val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DURATION)
         val sizeColumn = cursor.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
         val relativePathColumn = cursor.getColumnIndex(MediaStore.Files.FileColumns.RELATIVE_PATH)
@@ -99,12 +110,18 @@ private fun ContentResolver.loadMediaLibrary(context: Context? = null): MediaLib
                     mediaType != MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
                 ) continue
 
+                val dateTaken = if (dateTakenColumn >= 0 && !cursor.isNull(dateTakenColumn)) {
+                    cursor.getLong(dateTakenColumn)
+                } else {
+                    0L
+                }
+
                 add(
                     MediaItem(
                         id = id,
                         // Querying Files is useful for one combined image/video
                         // library, but the URI handed to the rest of the app must
-                        // remain in its real media collection.  In particular,
+                        // remain in its real media collection. In particular,
                         // opening a Video URI is more reliable than opening the
                         // read-only Files aggregation URI on scoped storage.
                         uri = ContentUris.withAppendedId(
@@ -119,6 +136,7 @@ private fun ContentResolver.loadMediaLibrary(context: Context? = null): MediaLib
                         mimeType = mimeType,
                         dateAddedSeconds = cursor.getLong(dateAddedColumn),
                         dateModifiedSeconds = if (dateModifiedColumn >= 0 && !cursor.isNull(dateModifiedColumn)) cursor.getLong(dateModifiedColumn) else 0L,
+                        dateTakenMillis = dateTaken,
                         durationMillis = if (cursor.isNull(durationColumn)) 0L else cursor.getLong(durationColumn),
                         sizeBytes = if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) cursor.getLong(sizeColumn) else 0L,
                         relativePath = relativePath.ifBlank { "Pictures/" },
@@ -136,10 +154,13 @@ private fun ContentResolver.loadMediaLibrary(context: Context? = null): MediaLib
                 .substringAfterLast('/')
                 .ifBlank { "Internal storage" }
 
+            // Selalu ambil foto/video terbaru berdasarkan tanggal pengambilan (effectiveDateSeconds)
+            val newestItem = items.maxByOrNull { it.effectiveDateSeconds } ?: items.first()
+
             MediaFolder(
                 path = path,
                 displayName = folderName,
-                thumbnail = items.first().uri,
+                thumbnail = newestItem.uri,
                 photoCount = items.count { !it.isVideo },
                 videoCount = items.count { it.isVideo },
             )
