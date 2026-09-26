@@ -13,7 +13,20 @@ import java.security.MessageDigest
  * Android removes this directory when the user chooses Settings > Apps >
  * QuickPic > Clear cache, while normal app restarts keep the thumbnails.
  */
-class ThumbnailCache(context: Context) {
+class ThumbnailCache private constructor(context: Context) {
+    companion object {
+        @Volatile private var instance: ThumbnailCache? = null
+
+        /**
+         * Satu instance yang dipakai bersama di seluruh app, sehingga layer
+         * in-memory LRU (15% max heap) benar-benar shared antar grid/layar,
+         * bukan cache terpisah-pisah per komponen.
+         */
+        fun getInstance(context: Context): ThumbnailCache = instance ?: synchronized(this) {
+            instance ?: ThumbnailCache(context.applicationContext).also { instance = it }
+        }
+    }
+
     private val directory = File(context.applicationContext.cacheDir, "quickpic_thumbnails").apply { mkdirs() }
     private val maxBytes = 256L * 1024L * 1024L // 256 MB on disk
 
@@ -32,6 +45,12 @@ class ThumbnailCache(context: Context) {
     /** Return the cached file on disk if it exists. */
     fun existing(uri: Uri, version: String): File? =
         fileFor(uri, version).takeIf { it.isFile && it.length() > 0L }
+            ?.also { touch(it) }
+
+    /** Tandai file sebagai baru diakses agar trimIfNeeded() evict berbasis LRU, bukan urutan tulis. */
+    private fun touch(file: File) {
+        runCatching { file.setLastModified(System.currentTimeMillis()) }
+    }
 
     /** Retrieve bitmap from memory cache, falling back to disk cache. */
     fun getBitmap(uri: Uri, version: String): Bitmap? {

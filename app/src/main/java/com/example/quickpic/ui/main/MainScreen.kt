@@ -56,6 +56,8 @@ import com.example.quickpic.rotateMediaFilePermanently
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -153,7 +155,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var selectedMediaIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var rotationRevision by remember { mutableLongStateOf(0L) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
-    val thumbnailCacheForRotation = remember { ThumbnailCache(context.applicationContext) }
+    val thumbnailCacheForRotation = remember { ThumbnailCache.getInstance(context) }
 
     // Helper untuk menjalankan rotasi permanen ke file
     val performPermanentRotation: (List<com.example.quickpic.data.MediaItem>, Int) -> Unit = { items, deg ->
@@ -984,19 +986,24 @@ private fun FolderGrid(
 
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
-    val cache = remember { ThumbnailCache(context) }
+    val cache = remember { ThumbnailCache.getInstance(context) }
 
     // Prefetch thumbnails for the next two rows ahead of the visible items
     LaunchedEffect(gridState.firstVisibleItemIndex, rotationRevision) {
-        val visibleItems = gridState.layoutInfo.visibleItemsInfo
-        val startPrefetch = gridState.firstVisibleItemIndex + visibleItems.size
-        val prefetchCount = visibleItems.size * 2
-        for (i in startPrefetch until (startPrefetch + prefetchCount)) {
-            if (i >= folders.size) break
-            val folder = folders[i]
-            if (folder.thumbnail != Uri.EMPTY) {
-                // Warm up memory cache; actual loading is performed by Coil when needed
-                cache.getBitmap(folder.thumbnail, "1:folder:${folder.path}:${folder.thumbnail}:$rotationRevision")
+        val visibleItemsInfo = gridState.layoutInfo.visibleItemsInfo
+        if (visibleItemsInfo.isEmpty()) return@LaunchedEffect
+        val columns = (visibleItemsInfo.maxOf { it.column } + 1).coerceAtLeast(1)
+        val lastVisibleIndex = visibleItemsInfo.last().index
+        val prefetchCount = columns * 2 // 2 baris ke depan
+        val start = lastVisibleIndex + 1
+        withContext(Dispatchers.IO) {
+            for (i in start until (start + prefetchCount)) {
+                if (i >= folders.size) break
+                val folder = folders[i]
+                if (folder.thumbnail != Uri.EMPTY) {
+                    // Warm up memory cache; actual loading is performed by Coil when needed
+                    cache.getBitmap(folder.thumbnail, "1:folder:${folder.path}:${folder.thumbnail}:$rotationRevision")
+                }
             }
         }
     }
@@ -1028,7 +1035,7 @@ private fun FolderCard(
         .semantics { contentDescription = "Folder ${folder.displayName}" }
 ) {
     if (folder.thumbnail != Uri.EMPTY) {
-        MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder:${folder.path}:${folder.thumbnail}:$rotationRevision", rotationRevision)
+        MediaThumbnailImage(folder.thumbnail, null, Modifier.fillMaxWidth().height(120.dp), rotationDegrees, "1:folder:${folder.path}:${folder.thumbnail}:$rotationRevision", rotationRevision, targetSizeDp = 120.dp)
     } else {
         Box(
             modifier = Modifier
@@ -1069,7 +1076,30 @@ private fun FolderCard(
     onMediaClick: (Int) -> Unit,
 ) {
     if (media.isEmpty()) { EmptyState("Tidak ada media di sini.", modifier); return }
-    LazyVerticalGrid(columns = GridCells.Adaptive(120.dp), modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+
+    val gridState = rememberLazyGridState()
+    val context = LocalContext.current
+    val thumbnailCache = remember { ThumbnailCache.getInstance(context) }
+
+    // Prefetch thumbnail untuk 2 baris ke depan dari yang sedang terlihat saat scrolling.
+    LaunchedEffect(gridState.firstVisibleItemIndex, rotationRevision) {
+        val visibleItemsInfo = gridState.layoutInfo.visibleItemsInfo
+        if (visibleItemsInfo.isEmpty()) return@LaunchedEffect
+        val columns = (visibleItemsInfo.maxOf { it.column } + 1).coerceAtLeast(1)
+        val lastVisibleIndex = visibleItemsInfo.last().index
+        val prefetchCount = columns * 2 // 2 baris ke depan
+        val start = lastVisibleIndex + 1
+        withContext(Dispatchers.IO) {
+            for (i in start until (start + prefetchCount)) {
+                if (i >= media.size) break
+                val item = media[i]
+                // Menghangatkan memory/disk cache; pemuatan aktual tetap dilakukan Coil saat item benar-benar tampil.
+                thumbnailCache.getBitmap(item.uri, "1:${item.id}:${item.sizeBytes}:${item.dateModifiedSeconds}:$rotationRevision")
+            }
+        }
+    }
+
+    LazyVerticalGrid(state = gridState, columns = GridCells.Adaptive(120.dp), modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         items(media, key = { it.id }) { item ->
             MediaThumbnail(
                 item = item,
@@ -1122,6 +1152,10 @@ private fun FolderCard(
         }
     }
 }
+// Plafon ukuran decode thumbnail dalam px, terlepas dari seberapa tinggi densitas layar
+// perangkat. Nilai ini adalah baseline yang sudah terbukti lancar sebelumnya.
+private const val MAX_THUMBNAIL_DECODE_PX = 320
+
 @Composable
 private fun MediaThumbnailImage(
     uri: Uri,
@@ -1130,20 +1164,31 @@ private fun MediaThumbnailImage(
     rotationDegrees: Int = 0,
     cacheVersion: String = "1",
     rotationRevision: Long = 0L,
+    targetSizeDp: Dp = 140.dp,
 ) {
     val context = LocalContext.current.applicationContext
     val imageLoader = remember(context) { context.imageLoader }
-    val thumbnailCache = remember(context) { com.example.quickpic.ThumbnailCache(context) }
+    val thumbnailCache = remember(context) { com.example.quickpic.ThumbnailCache.getInstance(context) }
     val cachedFile = remember(uri, cacheVersion, rotationRevision) { thumbnailCache.existing(uri, cacheVersion) }
     val saveScope = rememberCoroutineScope()
-    val request = remember(uri, cacheVersion, rotationRevision) {
+    val density = LocalDensity.current
+    // Target decode di-px sesuai kerapatan layar perangkat (mdpi/hdpi/xhdpi/dst), bukan
+    // angka tetap: layar berdensitas rendah tidak boros decode berlebih. Tapi dibatasi
+    // MAX_THUMBNAIL_DECODE_PX sebagai plafon: di device densitas tinggi (mis. OnePlus 5T,
+    // ~401ppi/density 3x) hasil kali dp*density tanpa batas bisa jauh melebihi ukuran aman
+    // sebelumnya (420px vs 320px), yang justru bikin decode makin berat dan grid lag saat
+    // scroll cepat—apalagi untuk thumbnail video yang framenya lebih mahal di-decode.
+    val targetPx = remember(density, targetSizeDp) {
+        with(density) { targetSizeDp.roundToPx() }.coerceIn(1, MAX_THUMBNAIL_DECODE_PX)
+    }
+    val request = remember(uri, cacheVersion, rotationRevision, targetPx) {
         ImageRequest.Builder(context)
             .data(uri)
             // Grid cells are small; decoding to a bounded thumbnail avoids
             // allocating full-resolution camera images/video frames.
-            .size(320, 320)
-            .memoryCacheKey("quickpic-thumb:$uri:$cacheVersion:$rotationRevision")
-            .diskCacheKey("quickpic-source:$uri:$cacheVersion:$rotationRevision")
+            .size(targetPx, targetPx)
+            .memoryCacheKey("quickpic-thumb:$uri:$cacheVersion:$rotationRevision:$targetPx")
+            .diskCacheKey("quickpic-source:$uri:$cacheVersion:$rotationRevision:$targetPx")
             .build()
     }
 
@@ -1919,6 +1964,7 @@ private fun CopyDestinationDialog(
                                             modifier = Modifier.fillMaxSize(),
                                             rotationDegrees = 0,
                                             cacheVersion = "1:folder",
+                                            targetSizeDp = 54.dp,
                                         )
                                     } else {
                                         Icon(
