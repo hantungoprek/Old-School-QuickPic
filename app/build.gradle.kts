@@ -5,14 +5,14 @@ plugins {
 }
 
 android {
-    namespace = "com.example.quickpic"
+    namespace = "com.gitarjs.quickpic"
     compileSdk = 35
     defaultConfig {
-        applicationId = "com.example.quickpic"
+        applicationId = "com.gitarjs.quickpic"
         minSdk = 29
         targetSdk = 35
-        versionCode = 16
-        versionName = "2.5.7"
+        versionCode = 17
+        versionName = "2.6.0"
     }
 
     buildTypes {
