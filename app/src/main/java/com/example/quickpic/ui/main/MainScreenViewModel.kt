@@ -7,6 +7,7 @@ import com.example.quickpic.data.DataRepository
 import com.example.quickpic.data.MediaFolder
 import com.example.quickpic.data.MediaItem
 import com.example.quickpic.data.MediaLibrary
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
@@ -43,6 +45,11 @@ class MainScreenViewModel(context: Context, dataRepository: DataRepository) : Vi
                 .combine(sortMode) { library, sort -> library to sort }
                 .combine(sortDirection) { (library, sort), direction -> library.sorted(sort, direction) }
                 .map<MediaLibrary, MainScreenUiState> { MainScreenUiState.Success(it) }
+                // Query MediaStore (dataRepository.data) dan proses sorting-nya BUKAN pekerjaan
+                // ringan untuk ribuan file — tanpa flowOn ini, semuanya berjalan di main thread
+                // (viewModelScope default-nya Main), menyebabkan UI freeze/jank saat load awal
+                // atau tiap kali refresh() dipanggil (rotate, hapus, rename, pindah, dll).
+                .flowOn(Dispatchers.IO)
         }
         .catch { emit(MainScreenUiState.Error(it)) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainScreenUiState.Loading)

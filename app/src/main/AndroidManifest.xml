@@ -4,6 +4,10 @@
     <!-- Android 13+ uses granular media permissions; older versions use storage read access. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 14+ (Selected Photos Access): wajib dideklarasikan agar saat pengguna memilih
+         "Izinkan akses terbatas" (hanya sebagian foto/video), aplikasi benar-benar diberi akses
+         ke subset yang dipilih. Tanpa ini, pilihan tersebut tidak akan memberi akses sama sekali. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />

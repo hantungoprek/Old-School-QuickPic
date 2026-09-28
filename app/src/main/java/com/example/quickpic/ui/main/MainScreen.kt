@@ -132,6 +132,7 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var rotationOpen by remember { mutableStateOf(false) }
     var rotationTargetItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var detailsItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
+    var cropTargetItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var renameFolder by remember { mutableStateOf<com.example.quickpic.data.MediaFolder?>(null) }
     var renameItem by remember { mutableStateOf<com.example.quickpic.data.MediaItem?>(null) }
     var renameError by remember { mutableStateOf<String?>(null) }
@@ -570,6 +571,40 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
         }
     }
 
+    if (viewerItems.isNotEmpty()) MediaViewer(
+        viewerItems,
+        viewerIndex,
+        onDismiss = { viewerItems = emptyList() },
+        onRotateRequest = { targetItem ->
+            rotationTargetItem = targetItem
+            rotationOpen = true
+        },
+        onDetailsRequest = { if (viewerItems.isNotEmpty()) detailsItem = viewerItems[viewerIndex] },
+        onRenameRequest = { if (viewerItems.isNotEmpty()) renameItem = viewerItems[viewerIndex] },
+        onMoveRequest = {
+            if (viewerItems.isNotEmpty()) {
+                moveItems = listOf(viewerItems[viewerIndex])
+                moveDestinationOpen = true
+            }
+        },
+        onCropRequest = { targetItem -> cropTargetItem = targetItem },
+        rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
+        rotationRevision = rotationRevision,
+    )
+
+    // Editor Crop — dibuka dari menu "Ubah" di overflow MediaViewer.
+    cropTargetItem?.let { item ->
+        CropScreen(
+            item = item,
+            onDismiss = { cropTargetItem = null },
+            onConfirm = {
+                cropTargetItem = null
+                rotationRevision = System.currentTimeMillis()
+                viewModel.refresh()
+            },
+        )
+    }
+
     if (sortOpen) {
         SortDialog(
             current = sortMode,
@@ -815,25 +850,6 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
             },
         )
     }
-    if (viewerItems.isNotEmpty()) MediaViewer(
-        viewerItems,
-        viewerIndex,
-        onDismiss = { viewerItems = emptyList() },
-        onRotateRequest = { targetItem ->
-            rotationTargetItem = targetItem
-            rotationOpen = true
-        },
-        onDetailsRequest = { if (viewerItems.isNotEmpty()) detailsItem = viewerItems[viewerIndex] },
-        onRenameRequest = { if (viewerItems.isNotEmpty()) renameItem = viewerItems[viewerIndex] },
-        onMoveRequest = {
-            if (viewerItems.isNotEmpty()) {
-                moveItems = listOf(viewerItems[viewerIndex])
-                moveDestinationOpen = true
-            }
-        },
-        rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 },
-        rotationRevision = rotationRevision,
-    )
     // Dialog rotasi dari MediaViewer (rotasi PERMANEN ke file)
     if (rotationOpen) {
         val target = rotationTargetItem ?: viewerItems.getOrNull(viewerIndex)
@@ -1220,6 +1236,7 @@ private fun MediaThumbnailImage(
     onDetailsRequest: () -> Unit,
     onRenameRequest: () -> Unit,
     onMoveRequest: () -> Unit,
+    onCropRequest: (com.example.quickpic.data.MediaItem) -> Unit,
     rotationDegrees: (Uri) -> Int,
     rotationRevision: Long = 0L,
 ) {
@@ -1236,12 +1253,12 @@ private fun MediaThumbnailImage(
 
     Dialog(onDismissRequest = { onDismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         DisposableEffect(Unit) {
-            val window = (context.findActivity())?.window
-            val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
-            controller?.hide(WindowInsetsCompat.Type.systemBars())
-            controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()); activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
-        }
+        val window = (context.findActivity())?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()); activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+    }
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), userScrollEnabled = true) { page ->
                 val item = items[page]
@@ -1294,7 +1311,14 @@ private fun MediaThumbnailImage(
                                         onRotateRequest(items[pagerState.currentPage])
                                     },
                                 )
-                                DropdownMenuItem(text = { Text("Ubah") }, onClick = { viewerOverflowOpen = false })
+                                DropdownMenuItem(
+                                    text = { Text("Ubah") },
+                                    enabled = !items[pagerState.currentPage].isVideo,
+                                    onClick = {
+                                        viewerOverflowOpen = false
+                                        onCropRequest(items[pagerState.currentPage])
+                                    },
+                                )
                                 DropdownMenuItem(text = { Text("Gunakan sebagai") }, onClick = { viewerOverflowOpen = false })
                                 DropdownMenuItem(text = { Text("Pindah ke") }, onClick = { viewerOverflowOpen = false; onMoveRequest() })
                                 DropdownMenuItem(text = { Text("Salin ke") }, onClick = { viewerOverflowOpen = false })
@@ -1426,7 +1450,7 @@ private fun formatDateTime(seconds: Long): String {
 @Composable
 private fun VideoPlayer(uri: Uri, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val player = remember(uri) { ExoPlayer.Builder(context).build().apply { setMediaItem(ExoMediaItem.fromUri(uri)); prepare(); playWhenReady = true } }
+    val player = remember(uri) { ExoPlayer.Builder(context).build().apply { setMediaItem(ExoMediaItem.fromUri(uri)); prepare(); playWhenReady = false } }
     var position by remember(uri) { mutableLongStateOf(0L) }
     var duration by remember(uri) { mutableLongStateOf(0L) }
     LaunchedEffect(player) {
@@ -2158,8 +2182,38 @@ private fun Context.deleteMediaItems(
 @Composable private fun Loading(modifier: Modifier) = Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
 @Composable private fun ErrorMessage(message: String, modifier: Modifier) = Box(modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(message) }
 
-private fun Context.hasMediaPermission() = mediaPermissions().all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+private fun Context.hasMediaPermission(): Boolean {
+    // Izin akses penuh (khusus IMAGES+VIDEO/READ_EXTERNAL_STORAGE saja, TANPA
+    // READ_MEDIA_VISUAL_USER_SELECTED) — permission itu tidak pernah ikut diberikan
+    // saat pengguna memilih "Izinkan semua", jadi harus dicek terpisah dari daftar
+    // yang dipakai untuk request izin (mediaPermissions()).
+    val coreGranted = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+        )
+        Build.VERSION.SDK_INT == Build.VERSION_CODES.Q -> arrayOf(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+        )
+        else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+    if (coreGranted) return true
+    // Android 14+ (Selected Photos Access): pengguna bisa memilih "Izinkan akses terbatas"
+    // (hanya sebagian foto/video) alih-alih izin penuh. Itu tetap dianggap sudah mengizinkan;
+    // ContentResolver otomatis hanya akan mengembalikan subset media yang dipilih pengguna.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+    }
+    return false
+}
+
 private fun mediaPermissions(): Array<String> = when {
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
+        Manifest.permission.READ_MEDIA_IMAGES,
+        Manifest.permission.READ_MEDIA_VIDEO,
+        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+    )
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
         Manifest.permission.READ_MEDIA_IMAGES,
         Manifest.permission.READ_MEDIA_VIDEO,
