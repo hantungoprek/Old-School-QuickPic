@@ -38,7 +38,10 @@ class MainScreenViewModel(context: Context, dataRepository: DataRepository) : Vi
     val selectedSortMode: StateFlow<SortMode> = sortMode
     val selectedSortDirection: StateFlow<SortDirection> = sortDirection
 
-    val uiState: StateFlow<MainScreenUiState> = refreshRequests
+    /** Query pencarian saat ini. String kosong berarti tidak ada filter aktif. */
+    val searchQuery = MutableStateFlow("")
+
+    private val baseUiState: StateFlow<MainScreenUiState> = refreshRequests
         .onStart { emit(Unit) }
         .flatMapLatest {
             dataRepository.data
@@ -52,6 +55,25 @@ class MainScreenViewModel(context: Context, dataRepository: DataRepository) : Vi
                 .flowOn(Dispatchers.IO)
         }
         .catch { emit(MainScreenUiState.Error(it)) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainScreenUiState.Loading)
+
+    /**
+     * UiState yang sudah difilter berdasarkan [searchQuery].
+     * Ketika query kosong, hasil identik dengan [baseUiState].
+     */
+    val uiState: StateFlow<MainScreenUiState> = baseUiState
+        .combine(searchQuery) { state, query ->
+            if (query.isBlank() || state !is MainScreenUiState.Success) {
+                state
+            } else {
+                val q = query.trim().lowercase()
+                val filtered = state.data.copy(
+                    folders = state.data.folders.filter { it.displayName.lowercase().contains(q) },
+                    media = state.data.media.filter { it.displayName.lowercase().contains(q) },
+                )
+                MainScreenUiState.Success(filtered)
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainScreenUiState.Loading)
 
     fun refresh() = refreshRequests.tryEmit(Unit)

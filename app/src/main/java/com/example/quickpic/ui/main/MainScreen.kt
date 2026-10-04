@@ -82,6 +82,11 @@ import kotlin.math.max
 import kotlin.math.min
 import java.io.File
 import java.io.InputStream
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 
 private enum class HomeTab { Folders, Photos, Videos }
 
@@ -157,6 +162,17 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
     var rotationRevision by remember { mutableLongStateOf(0L) }
     val photoRotations = remember { mutableStateMapOf<String, Int>() }
     val thumbnailCacheForRotation = remember { ThumbnailCache.getInstance(context) }
+    // State untuk fitur search
+    var searchActive by rememberSaveable { mutableStateOf(false) }
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val searchFocusRequester = remember { FocusRequester() }
+    // Tutup search saat tombol Back ditekan
+    if (searchActive) {
+        BackHandler {
+            searchActive = false
+            viewModel.searchQuery.value = ""
+        }
+    }
 
     // Helper untuk menjalankan rotasi permanen ke file
     val performPermanentRotation: (List<com.example.quickpic.data.MediaItem>, Int) -> Unit = { items, deg ->
@@ -193,38 +209,9 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
         }
     }
 
-    // Write-request launcher (Android 11+) untuk mendapat izin tulis ke MediaStore sebelum rotasi.
-    val writeRequestLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        val items = pendingRotateItems
-        val deg = pendingRotateDegrees
-        pendingRotateItems = emptyList()
-        pendingRotateDegrees = 0
-        if (result.resultCode == Activity.RESULT_OK && items.isNotEmpty()) {
-            performPermanentRotation(items, deg)
-        } else {
-            rotateBusy = false
-            if (items.isNotEmpty()) {
-                android.widget.Toast.makeText(context, "Izin tulis ditolak, file tidak diputar.", android.widget.Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
     val requestRotateItems: (List<com.example.quickpic.data.MediaItem>, Int) -> Unit = { items, deg ->
         if (items.isNotEmpty() && deg != 0) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                runCatching {
-                    val uris = items.map { it.uri }
-                    val request = MediaStore.createWriteRequest(context.contentResolver, uris)
-                    pendingRotateItems = items
-                    pendingRotateDegrees = deg
-                    writeRequestLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
-                }.onFailure {
-                    // Fallback jika createWriteRequest gagal (misal URI file non-MediaStore)
-                    performPermanentRotation(items, deg)
-                }
-            } else {
-                performPermanentRotation(items, deg)
-            }
+            performPermanentRotation(items, deg)
         }
     }
 
@@ -411,13 +398,48 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                                 selectionMode = false
                                 selectedMediaIds = emptySet()
                             }) { Icon(Icons.Default.Close, "Batal memilih") }
+                        } else if (searchActive) {
+                            IconButton(onClick = {
+                                searchActive = false
+                                viewModel.searchQuery.value = ""
+                            }) { Icon(Icons.Default.ArrowBack, "Tutup pencarian") }
                         } else if (selectedFolder != null) {
                             IconButton(onClick = { openFolderPath = null }) { Icon(Icons.Default.ArrowBack, "Kembali") }
                         } else IconButton(onClick = { drawerOpen = true }) { Icon(Icons.Default.Menu, "Menu") }
                     },
                     title = {
-                        if (selectionMode) Text("${selectedMediaIds.size} dipilih")
-                        else Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (searchActive) {
+                            val focusRequester = remember { FocusRequester() }
+                            LaunchedEffect(Unit) {
+                                runCatching { focusRequester.requestFocus() }
+                            }
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = { viewModel.searchQuery.value = it },
+                                placeholder = { Text("Cari folder atau file...") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .focusRequester(focusRequester),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                                ),
+                                trailingIcon = {
+                                    if (searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = { viewModel.searchQuery.value = "" }) {
+                                            Icon(Icons.Default.Close, "Hapus teks pencarian")
+                                        }
+                                    }
+                                },
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(onSearch = {}),
+                            )
+                        } else if (selectionMode) {
+                            Text("${selectedMediaIds.size} dipilih")
+                        } else {
+                            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     },
                     actions = {
                         if (selectionMode) {
@@ -510,6 +532,12 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                                 selectedMediaIds = emptySet()
                             }) { Icon(Icons.Default.Checklist, "Tandai") }
                         }
+                        // Tombol Search — tersedia di semua tampilan kecuali saat selection mode aktif
+                        if (!selectionMode && !searchActive) {
+                            IconButton(onClick = {
+                                searchActive = true
+                            }) { Icon(Icons.Default.Search, "Cari") }
+                        }
                         if (!selectionMode) Box {
                             IconButton(onClick = { overflowOpen = true }) { Icon(Icons.Default.MoreVert, "Menu lainnya") }
                             DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
@@ -555,16 +583,158 @@ private fun LibraryContent(library: com.example.quickpic.data.MediaLibrary, view
                     },
                 )
             } else {
-                Column(Modifier.fillMaxSize().padding(innerPadding)) {
-                    TabRow(selectedTabIndex = selectedTab) {
-                        HomeTab.entries.forEachIndexed { index, tab ->
-                            Tab(selected = selectedTab == index, onClick = { selectedTab = index }, text = { Text(tab.label()) }, icon = { Icon(tab.icon(), null) })
+                if (searchActive && searchQuery.isNotBlank()) {
+                    // ── Tampilan Hasil Pencarian ──────────────────────────────
+                    val matchedFolders = library.folders
+                    val matchedPhotos = library.media.filterNot { it.isVideo }
+                    val matchedVideos = library.media.filter { it.isVideo }
+                    val totalResults = matchedFolders.size + library.media.size
+
+                    if (totalResults == 0) {
+                        Box(Modifier.fillMaxSize().padding(innerPadding), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.SearchOff,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                )
+                                Spacer(Modifier.height(16.dp))
+                                Text(
+                                    "Tidak ada hasil untuk \"$searchQuery\"",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize().padding(innerPadding),
+                        ) {
+                            if (matchedFolders.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        "Folder (${matchedFolders.size})",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    )
+                                }
+                                items(matchedFolders) { folder ->
+                                    ListItem(
+                                        headlineContent = { Text(folder.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        supportingContent = { Text("${folder.totalCount} item", style = MaterialTheme.typography.bodySmall) },
+                                        leadingContent = {
+                                            Box(
+                                                Modifier
+                                                    .size(56.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                AsyncImage(
+                                                    model = folder.thumbnail,
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.clickable { openFolderPath = folder.path; searchActive = false; viewModel.searchQuery.value = "" },
+                                    )
+                                }
+                                if (matchedPhotos.isNotEmpty() || matchedVideos.isNotEmpty()) {
+                                    item { HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp)) }
+                                }
+                            }
+                            if (matchedPhotos.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        "Foto (${matchedPhotos.size})",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    )
+                                }
+                                items(matchedPhotos) { item ->
+                                    ListItem(
+                                        headlineContent = { Text(item.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        supportingContent = { Text(item.relativePath.trimEnd('/'), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        leadingContent = {
+                                            Box(
+                                                Modifier
+                                                    .size(56.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                AsyncImage(
+                                                    model = item.uri,
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.clickable {
+                                            viewerItems = matchedPhotos
+                                            viewerIndex = matchedPhotos.indexOf(item).coerceAtLeast(0)
+                                        },
+                                    )
+                                }
+                                if (matchedVideos.isNotEmpty()) {
+                                    item { HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp)) }
+                                }
+                            }
+                            if (matchedVideos.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        "Video (${matchedVideos.size})",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    )
+                                }
+                                items(matchedVideos) { item ->
+                                    ListItem(
+                                        headlineContent = { Text(item.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        supportingContent = { Text(item.relativePath.trimEnd('/'), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        leadingContent = {
+                                            Box(
+                                                Modifier
+                                                    .size(56.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.PlayCircle,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.clickable {
+                                            viewerItems = matchedVideos
+                                            viewerIndex = matchedVideos.indexOf(item).coerceAtLeast(0)
+                                        },
+                                    )
+                                }
+                            }
                         }
                     }
-                    when (HomeTab.entries[selectedTab]) {
-                        HomeTab.Folders -> FolderGrid(library.folders, rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision) { openFolderPath = it.path }
-                        HomeTab.Photos -> { val list = library.media.filterNot { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision, onMediaClick = { viewerItems = list; viewerIndex = it }) }
-                        HomeTab.Videos -> { val list = library.media.filter { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision, onMediaClick = { viewerItems = list; viewerIndex = it }) }
+                } else {
+                    Column(Modifier.fillMaxSize().padding(innerPadding)) {
+                        TabRow(selectedTabIndex = selectedTab) {
+                            HomeTab.entries.forEachIndexed { index, tab ->
+                                Tab(selected = selectedTab == index, onClick = { selectedTab = index }, text = { Text(tab.label()) }, icon = { Icon(tab.icon(), null) })
+                            }
+                        }
+                        when (HomeTab.entries[selectedTab]) {
+                            HomeTab.Folders -> FolderGrid(library.folders, rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision) { openFolderPath = it.path }
+                            HomeTab.Photos -> { val list = library.media.filterNot { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision, onMediaClick = { viewerItems = list; viewerIndex = it }) }
+                            HomeTab.Videos -> { val list = library.media.filter { it.isVideo }; MediaGrid(list, Modifier.fillMaxSize(), rotationDegrees = { uri -> photoRotations[uri.toString()] ?: 0 }, rotationRevision = rotationRevision, onMediaClick = { viewerItems = list; viewerIndex = it }) }
+                        }
                     }
                 }
             }
@@ -2182,46 +2352,13 @@ private fun Context.deleteMediaItems(
 @Composable private fun Loading(modifier: Modifier) = Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
 @Composable private fun ErrorMessage(message: String, modifier: Modifier) = Box(modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) { Text(message) }
 
-private fun Context.hasMediaPermission(): Boolean {
-    // Izin akses penuh (khusus IMAGES+VIDEO/READ_EXTERNAL_STORAGE saja, TANPA
-    // READ_MEDIA_VISUAL_USER_SELECTED) — permission itu tidak pernah ikut diberikan
-    // saat pengguna memilih "Izinkan semua", jadi harus dicek terpisah dari daftar
-    // yang dipakai untuk request izin (mediaPermissions()).
-    val coreGranted = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-            Manifest.permission.READ_MEDIA_IMAGES,
-            Manifest.permission.READ_MEDIA_VIDEO,
-        )
-        Build.VERSION.SDK_INT == Build.VERSION_CODES.Q -> arrayOf(
-            Manifest.permission.READ_EXTERNAL_STORAGE,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-        )
-        else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-    }.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
-    if (coreGranted) return true
-    // Android 14+ (Selected Photos Access): pengguna bisa memilih "Izinkan akses terbatas"
-    // (hanya sebagian foto/video) alih-alih izin penuh. Itu tetap dianggap sudah mengizinkan;
-    // ContentResolver otomatis hanya akan mengembalikan subset media yang dipilih pengguna.
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-    }
-    return false
-}
+private fun Context.hasMediaPermission(): Boolean = arrayOf(
+    Manifest.permission.READ_EXTERNAL_STORAGE,
+    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+).all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
 
-private fun mediaPermissions(): Array<String> = when {
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
-        Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_VIDEO,
-        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
-    )
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-        Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_VIDEO,
-    )
-    Build.VERSION.SDK_INT == Build.VERSION_CODES.Q -> arrayOf(
-        Manifest.permission.READ_EXTERNAL_STORAGE,
-        Manifest.permission.WRITE_EXTERNAL_STORAGE,
-    )
-    else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-}
+private fun mediaPermissions(): Array<String> = arrayOf(
+    Manifest.permission.READ_EXTERNAL_STORAGE,
+    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+)
 private fun Context.findActivity(): Activity? { var c: Context = this; while (c is android.content.ContextWrapper) { if (c is Activity) return c; c = c.baseContext }; return null }

@@ -5,14 +5,14 @@ plugins {
 }
 
 android {
-    namespace = "com.gitarjs.quickpic"
+    namespace = "com.example.quickpic"
     compileSdk = 35
     defaultConfig {
         applicationId = "com.gitarjs.quickpic"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 29
         versionCode = 17
-        versionName = "2.6.0"
+        versionName = "2.6.0-android10"
     }
 
     buildTypes {
@@ -22,8 +22,8 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures {
         compose = true
@@ -32,7 +32,7 @@ android {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
